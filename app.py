@@ -1035,12 +1035,16 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         "Columns are labelled A, B, C... (A = index 0, B = index 1, ...).\n"
         "Rows are shown as actual Excel row numbers.\n\n"
         "Your goal: understand how the file identifies FG (Finished Good) vs RM (Raw Material) rows, "
-        "then output a JSON conversion spec.\n\n"
-        "Ask ONE short question at a time until you fully know:\n"
+        "then immediately output a JSON conversion spec.\n\n"
+        "The user will explain the logic in plain language. Extract from their description:\n"
         "  1. Which column has the item name / description\n"
         "  2. Which column has the quantity\n"
-        "  3. How FG vs RM rows are identified — e.g. a column with values like FG/RM/SFG, "
-        "leading spaces/indentation, a level number (1/2/3), or any other indicator\n\n"
+        "  3. How FG vs RM rows are identified (font style, column value, indentation, level number, etc.)\n"
+        "  4. Which row is the header row\n\n"
+        "If the user's message contains enough information, output the JSON spec IMMEDIATELY — "
+        "do NOT ask follow-up questions unnecessarily. "
+        "Only ask a follow-up if something critical is genuinely missing or ambiguous. "
+        "Keep any follow-up to a single short question.\n\n"
         "When you have all the information, respond with ONLY a raw JSON object "
         "(no markdown, no extra text) in this shape:\n"
         '{"ready":true,"header_row":<Excel row number minus 1>,"item_name_col":<0-indexed>,'
@@ -1700,7 +1704,7 @@ with tab3:
                 # ── Chat input (shown until spec is ready) ────────────────
                 else:
                     prompt = st.chat_input(
-                        "Describe the BOM logic or answer the question above…",
+                        "Explain the BOM logic — e.g. 'Col B = item name, Col C = qty, bold rows are FG, italic are RM, header is row 8'",
                         key="other_chat_input"
                     )
                     if prompt:
