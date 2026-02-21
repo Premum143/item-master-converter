@@ -1055,6 +1055,7 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
     )
 
+    import time
     client = genai.Client(api_key=api_key)
 
     # Build history from all but the last message
@@ -1071,8 +1072,17 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         config=types.GenerateContentConfig(system_instruction=sys_prompt),
         history=history
     )
-    response = chat.send_message(chat_history[-1]["content"])
-    return response.text
+
+    # Retry up to 3 times on 503 temporary overload
+    for attempt in range(3):
+        try:
+            response = chat.send_message(chat_history[-1]["content"])
+            return response.text
+        except Exception as e:
+            if "503" in str(e) and attempt < 2:
+                time.sleep(4 * (attempt + 1))   # 4s, 8s
+                continue
+            raise
 
 
 def extract_bom_spec(text):
