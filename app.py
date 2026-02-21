@@ -1049,6 +1049,9 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         "For indentation-based hierarchy use:\n"
         '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
         '"hierarchy_method":"indentation","fg_indent":0,"rm_indent":4}\n\n'
+        "For font-based hierarchy (bold = FG, italic = RM, bold+italic = SFG) use:\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"font"}\n\n'
         "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
     )
 
@@ -1064,7 +1067,7 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         ))
 
     chat = client.chats.create(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         config=types.GenerateContentConfig(system_instruction=sys_prompt),
         history=history
     )
