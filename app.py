@@ -730,10 +730,10 @@ def read_sheet_rows(file_bytes, sheet_name=None):
     return rows, list(sheets.keys())
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Page config & custom CSS
+# Page config & CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="TranZact · Item Converter",
+    page_title="TranZact · Master Data Converter",
     page_icon="⚡",
     layout="centered"
 )
@@ -742,95 +742,139 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;900&display=swap');
 
-/* ── Top logo bar ── */
+/* ── Logo bar ── */
 .logo-bar {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 18px 0 8px 0;
+    padding: 18px 0 6px 0;
 }
 
-/* ── Gradient header bar ── */
+/* ── Header subtitle bar ── */
 .header-bar {
     background: linear-gradient(135deg, #1a1b17 0%, #2a1f2d 100%);
     border: 1px solid #292a27;
     border-left: 4px solid #da5d37;
     border-radius: 10px;
-    padding: 16px 24px;
-    margin: 4px 0 16px 0;
+    padding: 14px 20px;
+    margin: 4px 0 12px 0;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
 }
-.header-bar p {
-    color: #aaaca6 !important;
-    font-size: 0.92rem !important;
-    margin: 0 !important;
+.header-bar .pill {
+    background: #232420;
+    border: 1px solid #3a3b37;
+    border-radius: 20px;
+    padding: 3px 12px;
+    font-size: 0.78rem;
+    color: #aaaca6;
+    white-space: nowrap;
 }
 
-/* ── Card-style containers ── */
-[data-testid="stExpander"] {
-    border: 1px solid #292a27 !important;
-    border-radius: 10px !important;
-}
-
-/* ── Upload area ── */
+/* ── Upload zone ── */
 [data-testid="stFileUploader"] {
     border: 2px dashed #da5d37 !important;
-    border-radius: 10px !important;
-    padding: 8px !important;
+    border-radius: 12px !important;
+    padding: 6px !important;
 }
 
-/* ── Subtle divider ── */
+/* ── Expander cards ── */
+[data-testid="stExpander"] {
+    border: 1px solid #2e2f2b !important;
+    border-radius: 10px !important;
+    background: #141510 !important;
+}
+
+/* ── Mapping preview grid ── */
+.map-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 6px 10px;
+    align-items: center;
+    margin: 8px 0;
+}
+.map-src  { background:#1e2a1e; color:#7ecf7e; border-radius:6px; padding:4px 10px; font-size:0.82rem; font-family:monospace; }
+.map-tgt  { background:#1e1e2a; color:#7e9ecf; border-radius:6px; padding:4px 10px; font-size:0.82rem; }
+.map-arr  { color:#555; font-size:0.9rem; text-align:center; }
+.map-extra{ background:#2a2117; color:#c8a96e; border-radius:6px; padding:3px 9px; font-size:0.78rem; font-family:monospace; display:inline-block; margin:2px; }
+
+/* ── Network stat cards ── */
+.stat-cards { display:flex; gap:12px; margin:14px 0; }
+.stat-card  {
+    flex:1; border-radius:12px; padding:16px 18px;
+    display:flex; flex-direction:column; gap:4px;
+}
+.stat-card .sc-num  { font-size:2rem; font-weight:800; font-family:'Outfit',sans-serif; line-height:1; }
+.stat-card .sc-lbl  { font-size:0.78rem; font-weight:600; letter-spacing:0.03em; opacity:0.8; }
+.stat-green { background:#0f2318; border:1px solid #1f4a30; }
+.stat-green .sc-num { color:#4ade80; }
+.stat-green .sc-lbl { color:#86efac; }
+.stat-amber { background:#231a0a; border:1px solid #4a3010; }
+.stat-amber .sc-num { color:#fbbf24; }
+.stat-amber .sc-lbl { color:#fcd34d; }
+.stat-red   { background:#1f0e0e; border:1px solid #4a1f1f; }
+.stat-red   .sc-num { color:#f87171; }
+.stat-red   .sc-lbl { color:#fca5a5; }
+
+/* ── Format badge ── */
+.fmt-badge {
+    display:inline-block; border-radius:20px; padding:2px 12px;
+    font-size:0.75rem; font-weight:700; letter-spacing:0.04em;
+    background:#1e2630; color:#7eb8f0; border:1px solid #2d4a6a;
+    margin-bottom:10px;
+}
+
+/* ── Template card ── */
+.tmpl-card {
+    background:#141510; border:1px solid #2e2f2b;
+    border-radius:10px; padding:14px 18px; margin-bottom:10px;
+}
+
+/* ── Divider ── */
 hr { border-color: #292a27 !important; }
 
-/* ── Tab styling ── */
-[data-testid="stTab"] { font-weight: 600; }
+/* ── Tab labels ── */
+button[data-baseweb="tab"] { font-weight: 600 !important; font-size:0.9rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Logo ──
+# ── Header ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="logo-bar">
-
-  <!-- Colourful X icon (4 arms, each a different brand colour) -->
-  <svg width="42" height="42" viewBox="0 0 42 42" style="flex-shrink:0">
-    <!-- bottom-left arm : yellow/amber -->
+  <svg width="40" height="40" viewBox="0 0 42 42" style="flex-shrink:0">
     <line x1="21" y1="21" x2="4"  y2="38" stroke="#F5A623" stroke-width="9" stroke-linecap="round"/>
-    <!-- top-right arm   : green -->
     <line x1="21" y1="21" x2="38" y2="4"  stroke="#5CB85C" stroke-width="9" stroke-linecap="round"/>
-    <!-- top-left arm    : teal/blue -->
     <line x1="21" y1="21" x2="4"  y2="4"  stroke="#4A90D9" stroke-width="9" stroke-linecap="round"/>
-    <!-- bottom-right arm: coral/orange -->
     <line x1="21" y1="21" x2="38" y2="38" stroke="#E05A3C" stroke-width="9" stroke-linecap="round"/>
-    <!-- centre cap to clean up overlap -->
     <circle cx="21" cy="21" r="5" fill="#0e0f0c"/>
   </svg>
-
-  <!-- Wordmark -->
-  <span style="font-family:'Outfit',sans-serif; font-size:1.75rem; font-weight:900;
-               letter-spacing:-0.5px; color:#ffffff; line-height:1;">TRANZACT</span>
-
-  <!-- AI badge -->
-  <span style="display:inline-flex; align-items:center; gap:3px;
-               border:2px solid #E07A5F; border-radius:7px;
-               padding:3px 9px 3px 7px;
-               font-family:'Outfit',sans-serif; font-size:0.85rem;
-               font-weight:700; color:#ffffff; line-height:1; margin-left:2px;">
-    Ai&nbsp;<span style="color:#F5D76E; font-size:0.75rem; vertical-align:middle;">✦</span>
+  <span style="font-family:'Outfit',sans-serif;font-size:1.72rem;font-weight:900;
+               letter-spacing:-0.5px;color:#fff;line-height:1;">TRANZACT</span>
+  <span style="display:inline-flex;align-items:center;gap:3px;
+               border:2px solid #E07A5F;border-radius:7px;padding:3px 9px 3px 7px;
+               font-family:'Outfit',sans-serif;font-size:0.84rem;font-weight:700;
+               color:#fff;line-height:1;margin-left:2px;">
+    Ai&nbsp;<span style="color:#F5D76E;font-size:0.73rem;vertical-align:middle;">✦</span>
   </span>
-
 </div>
 <div class="header-bar">
-  <p>Item Master Converter &nbsp;·&nbsp; Upload any client file — auto-detects columns &amp; converts instantly</p>
+  <span style="color:#aaaca6;font-size:0.88rem;">Master Data Converter</span>
+  <span class="pill">📦 Item Master</span>
+  <span class="pill">🏢 Network Master</span>
+  <span class="pill">⚡ Auto-detects any client format</span>
 </div>
 """, unsafe_allow_html=True)
 
 st.divider()
-tab1, tab2, tab3, tab4 = st.tabs(["📥  Item Master", "📤  My Format → Tally", "🗂  Templates", "🏢  Network Master"])
+tab1, tab2, tab3 = st.tabs(["📦  Item Master", "🏢  Network Master", "🗂  Templates"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 : Any client format  →  Product_Add_(X).xlsx
 # ─────────────────────────────────────────────────────────────────────────────
 with tab1:
-    st.markdown("Upload any client file — columns are **auto-detected and mapped** to your format.")
+    st.markdown("Upload any client item file — columns are **auto-detected and mapped** to your format.")
 
     up = st.file_uploader("Upload client file", type=["xlsx", "xls"], key="t1_up",
                           label_visibility="collapsed")
@@ -840,7 +884,6 @@ with tab1:
         fbytes = up.read()
         fname  = up.name
 
-        # Re-process only when a different file is uploaded
         if st.session_state.get("t1_fname") != fname:
             sheets     = read_file(fbytes)
             sname      = pick_sheet(sheets)
@@ -871,14 +914,32 @@ with tab1:
         tname      = st.session_state.t1_tname
         mapping    = st.session_state.t1_mapping
         extra_cols = st.session_state.t1_extra
+        data_rows  = [r for r in rows[hidx + 1:] if any(v for v in r)]
 
-        st.success(f"✅  **{fname}** uploaded")
-        if tname:
-            st.info(f"📋  Matched template: **{tname}**")
+        # ── File info strip ──────────────────────────────────────────────
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("File", fname.rsplit(".", 1)[0][:22])
+        col_b.metric("Rows detected", len(data_rows))
+        col_c.metric("Template", tname if tname else "Auto-mapped")
 
-        if st.button("▶  Convert Now", type="primary",
-                     use_container_width=True, key="t1_go"):
-            result = do_convert(rows, hidx, mapping, extra_cols)
+        # ── Mapping preview ──────────────────────────────────────────────
+        with st.expander("🔍  Detected column mapping", expanded=False):
+            if mapping:
+                rows_html = ""
+                for tgt, src in mapping.items():
+                    if src:
+                        rows_html += f'<div class="map-grid"><span class="map-src">{src}</span><span class="map-arr">→</span><span class="map-tgt">{tgt}</span></div>'
+                if extra_cols:
+                    extras_html = "".join(f'<span class="map-extra">{e}</span>' for e in extra_cols[:12])
+                    rows_html += f'<div style="margin-top:10px;"><span style="color:#888;font-size:0.8rem;">Extra columns appended: </span>{extras_html}</div>'
+                st.markdown(rows_html, unsafe_allow_html=True)
+            else:
+                st.caption("No mapping detected yet.")
+
+        st.markdown("")
+        if st.button("▶  Convert Now", type="primary", use_container_width=True, key="t1_go"):
+            with st.spinner("Converting…"):
+                result = do_convert(rows, hidx, mapping, extra_cols)
             if result:
                 st.session_state.t1_out      = make_xlsx(result, extra_cols)
                 st.session_state.t1_out_name = out_filename(fname)
@@ -886,7 +947,6 @@ with tab1:
             else:
                 st.error("❌  No items found — could not identify the Item Name column.")
 
-        # ── Download ──────────────────────────────────────────────────────
         if st.session_state.get("t1_out") and st.session_state.get("t1_fname") == fname:
             cnt = st.session_state.t1_out_cnt
             st.success(f"✅  **{cnt} items** converted successfully!")
@@ -900,9 +960,8 @@ with tab1:
                 key="t1_dl"
             )
 
-            # ── Save as template (shown only for new/unknown formats) ─────
             if not tname:
-                with st.expander("💾  Save mapping as template for next time"):
+                with st.expander("💾  Save mapping as template for this client"):
                     sc1, sc2 = st.columns([3, 1])
                     tname_in = sc1.text_input(
                         "Template name:",
@@ -923,139 +982,10 @@ with tab1:
                             st.success(f"✅  Saved as **{tname_in.strip()}**!")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 : Product_Add_(X).xlsx  →  tranzact_item_(X).xlsx  (Tally import)
+# TAB 2 : Network Master  →  Network_Add_(X).xlsx
 # ─────────────────────────────────────────────────────────────────────────────
 with tab2:
-    st.markdown("Upload your **Product Add file** and download it in the **Tally import** format.")
-
-    uploaded_mine = st.file_uploader(
-        "Upload My File", type=["xlsx", "xls"],
-        key="mine_upload", label_visibility="collapsed"
-    )
-
-    if uploaded_mine:
-        st.success(f"✅  **{uploaded_mine.name}** uploaded")
-
-        if st.button("▶  Convert to Tally Format", type="primary",
-                     use_container_width=True, key="btn_tab2"):
-            with st.spinner("Converting..."):
-                try:
-                    uploaded_mine.seek(0)
-                    file_bytes = uploaded_mine.read()
-                    all_rows, _ = read_sheet_rows(file_bytes, sheet_name="Data")
-
-                    wb_out = Workbook()
-                    ws_out = wb_out.active
-                    ws_out.title = "SVNaturalLanguage"
-                    ws_out.append([
-                        "$Name", "$GSTTypeofSupply", "$BaseUnits", "$_HSNCode",
-                        "$Parent", "$OpeningRate", "$_IntegratedTax",
-                        "$OpeningBalance", "$_ClosingBalance", "$Description"
-                    ])
-                    ws_out.append([""] * 10)
-
-                    converted = 0
-                    for row in all_rows[1:]:
-                        if len(row) < 18:
-                            continue
-                        item_name = row[1]
-                        uom       = row[4]
-                        hsn       = row[5]
-                        category  = row[6]
-                        tax       = row[17]
-
-                        if not item_name or str(item_name).strip() == "":
-                            continue
-
-                        gst_type = "" if (tax is not None and str(tax).strip() == "") else "Goods"
-
-                        if tax is None:
-                            integrated_tax = "0"
-                        elif str(tax).strip() == "":
-                            integrated_tax = ""
-                        else:
-                            try:
-                                integrated_tax = str(int(float(tax)))
-                            except (ValueError, TypeError):
-                                integrated_tax = str(tax)
-
-                        if not hsn or str(hsn).strip() == "":
-                            hsn_str = ""
-                        else:
-                            try:
-                                hsn_str = str(int(float(hsn)))
-                            except (ValueError, TypeError):
-                                hsn_str = str(hsn).strip()
-
-                        ws_out.append([
-                            str(item_name).strip(), gst_type,
-                            str(uom).strip() if uom else "",
-                            hsn_str,
-                            str(category).strip() if category else "",
-                            "", integrated_tax, "", "", ""
-                        ])
-                        converted += 1
-
-                    match = re.search(r'\(([^)]+)\)', uploaded_mine.name)
-                    cn = match.group(1) if match else "Export"
-
-                    buffer = io.BytesIO()
-                    wb_out.save(buffer)
-                    buffer.seek(0)
-
-                    st.success(f"✅  **{converted} items** converted!")
-                    st.info("💡  Fill in Opening Rate, Opening Balance, and Closing Balance from Tally.")
-                    st.download_button(
-                        "⬇️  Download Tally File",
-                        data=buffer,
-                        file_name=f"tranzact_item_({cn}).xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary",
-                        use_container_width=True
-                    )
-                except KeyError:
-                    st.error("❌  Could not find the 'Data' sheet. Make sure you're uploading the correct file.")
-                except Exception as e:
-                    st.error(f"❌  Something went wrong: {e}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 : Manage templates
-# ─────────────────────────────────────────────────────────────────────────────
-with tab3:
-    st.markdown("Templates are saved when you convert a new client format and click **💾 Save**.")
-
-    templates = load_templates()
-
-    if not templates:
-        st.info("No templates saved yet. Convert a file in **Tab 1** and save the mapping.")
-    else:
-        for name, tmpl in list(templates.items()):
-            with st.expander(f"📋  {name}"):
-                m = tmpl.get("mapping", {})
-                for t, c in m.items():
-                    if c:
-                        st.markdown(f"- **{t}** ← `{c}`")
-                ec = tmpl.get("extra_cols", [])
-                if ec:
-                    st.markdown(f"- *Extra columns:* `{', '.join(ec)}`")
-                fp = tmpl.get("fingerprint", [])
-                if fp:
-                    preview = ", ".join(fp[:5]) + ("…" if len(fp) > 5 else "")
-                    st.caption(f"Identified by {len(fp)} columns: {preview}")
-                if st.button(f"🗑  Delete  '{name}'", key=f"del_{name}"):
-                    del templates[name]
-                    save_templates(templates)
-                    st.rerun()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 : Network Master  →  Network_Add_(X).xlsx
-# ─────────────────────────────────────────────────────────────────────────────
-with tab4:
     st.markdown("Upload a client ledger / vendor file — auto-converts to your **Network Add** format.")
-    st.markdown(
-        "**Output has 3 sheets:** &nbsp; ✅ Ready to upload &nbsp;·&nbsp; 🔑 Have GSTIN &nbsp;·&nbsp; ✏️ Need to update manually",
-        unsafe_allow_html=True
-    )
 
     net_up = st.file_uploader("Upload client file", type=["xlsx", "xls"], key="net_up",
                                label_visibility="collapsed")
@@ -1067,15 +997,15 @@ with tab4:
 
         if st.session_state.get("net_fname") != net_fname:
             try:
-                sheets   = read_file(net_bytes)
-                sname    = _tally_detect_sheet(sheets)
-                rows     = sheets[sname]
+                sheets    = read_file(net_bytes)
+                sname     = _tally_detect_sheet(sheets)
+                rows      = sheets[sname]
                 fmt, hidx = detect_network_format(rows)
-                st.session_state.net_fname  = net_fname
-                st.session_state.net_rows   = rows
-                st.session_state.net_hidx   = hidx
-                st.session_state.net_fmt    = fmt
-                st.session_state.net_out    = None
+                st.session_state.net_fname = net_fname
+                st.session_state.net_rows  = rows
+                st.session_state.net_hidx  = hidx
+                st.session_state.net_fmt   = fmt
+                st.session_state.net_out   = None
             except Exception as e:
                 st.error(f"❌  Could not read file: {e}")
                 st.stop()
@@ -1084,40 +1014,49 @@ with tab4:
         hidx  = st.session_state.net_hidx
         fmt   = st.session_state.net_fmt
 
-        st.success(f"✅  **{net_fname}** uploaded")
-        fmt_label = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "unknown": "Unknown"}
-        st.caption(f"Detected format: **{fmt_label.get(fmt, fmt)}**")
+        fmt_labels = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "unknown": "Unknown"}
+        st.markdown(f'<span class="fmt-badge">⚙ {fmt_labels.get(fmt, fmt)}</span>', unsafe_allow_html=True)
+
+        col_a, col_b = st.columns(2)
+        col_a.metric("File", net_fname.rsplit(".", 1)[0][:28])
+        data_rows_net = [r for r in rows[hidx + 1:] if any(v for v in r if v)]
+        col_b.metric("Rows detected", len(data_rows_net))
 
         if fmt == "unknown":
             st.warning("⚠️  Could not detect file format. Please check the file.")
         else:
-            if st.button("▶  Convert Now", type="primary",
-                         use_container_width=True, key="net_go"):
+            st.markdown("")
+            if st.button("▶  Convert Now", type="primary", use_container_width=True, key="net_go"):
                 with st.spinner("Converting…"):
                     try:
-                        if fmt == "tally":
-                            parties = convert_tally_parties(rows, hidx)
-                        else:
-                            parties = convert_mshriy_parties(rows, hidx)
-
-                        pindb   = load_pincode_db()
-                        parties = apply_pincode_lookup(parties, pindb)
+                        parties = convert_tally_parties(rows, hidx) if fmt == "tally" else convert_mshriy_parties(rows, hidx)
+                        parties = apply_pincode_lookup(parties, load_pincode_db())
                         ready, have_gstin, manual = split_network_sheets(parties)
-
                         st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual)
                         st.session_state.net_out_name = net_filename(net_fname)
-                        st.session_state.net_counts   = (len(ready), len(have_gstin), len(manual))
+                        st.session_state.net_counts   = (len(ready), len(have_gstin), len(manual), len(parties))
                     except Exception as e:
                         st.error(f"❌  Something went wrong: {e}")
 
         if st.session_state.get("net_out") and st.session_state.get("net_fname") == net_fname:
-            r, g, m = st.session_state.net_counts
-            c1, c2, c3 = st.columns(3)
-            c1.metric("✅ Ready to upload", r)
-            c2.metric("🔑 Have GSTIN", g)
-            c3.metric("✏️ Need to update manually", m)
-
-            st.info("🔴  Rows highlighted in red = non-standard party type (not Sundry Debtors/Creditors) — review with client.")
+            r, g, m, total = st.session_state.net_counts
+            st.markdown(f"""
+            <div class="stat-cards">
+              <div class="stat-card stat-green">
+                <div class="sc-num">{r}</div>
+                <div class="sc-lbl">✅ READY TO UPLOAD</div>
+              </div>
+              <div class="stat-card stat-amber">
+                <div class="sc-num">{g}</div>
+                <div class="sc-lbl">🔑 HAVE GSTIN</div>
+              </div>
+              <div class="stat-card stat-red">
+                <div class="sc-num">{m}</div>
+                <div class="sc-lbl">✏️ NEED MANUAL UPDATE</div>
+              </div>
+            </div>
+            <p style="color:#666;font-size:0.78rem;margin:0 0 12px 0;">{total} parties processed total &nbsp;·&nbsp; 🔴 Red rows = non-standard party type — review with client</p>
+            """, unsafe_allow_html=True)
 
             st.download_button(
                 "⬇️  Download Network Add File",
@@ -1129,5 +1068,51 @@ with tab4:
                 key="net_dl"
             )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 3 : Templates
+# ─────────────────────────────────────────────────────────────────────────────
+with tab3:
+    templates = load_templates()
+
+    if not templates:
+        st.markdown("""
+        <div style="text-align:center;padding:40px 20px;color:#666;">
+          <div style="font-size:2.5rem;margin-bottom:12px;">🗂</div>
+          <div style="font-size:1rem;font-weight:600;color:#888;margin-bottom:6px;">No templates saved yet</div>
+          <div style="font-size:0.84rem;">Convert a client file in <b>Item Master</b> tab and click <b>💾 Save mapping</b> — next time the same client's file is auto-recognised.</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"**{len(templates)} saved template{'s' if len(templates) != 1 else ''}** — uploaded when a matching client file is detected automatically.")
+        st.markdown("")
+        for name, tmpl in list(templates.items()):
+            with st.expander(f"📋  {name}"):
+                m  = tmpl.get("mapping", {})
+                ec = tmpl.get("extra_cols", [])
+                fp = tmpl.get("fingerprint", [])
+
+                rows_html = ""
+                for t, c in m.items():
+                    if c:
+                        rows_html += f'<div class="map-grid"><span class="map-src">{c}</span><span class="map-arr">→</span><span class="map-tgt">{t}</span></div>'
+                if ec:
+                    extras = "".join(f'<span class="map-extra">{e}</span>' for e in ec[:10])
+                    rows_html += f'<div style="margin-top:8px;"><span style="color:#888;font-size:0.78rem;">Extra: </span>{extras}</div>'
+                if rows_html:
+                    st.markdown(rows_html, unsafe_allow_html=True)
+                if fp:
+                    preview = ", ".join(fp[:6]) + ("…" if len(fp) > 6 else "")
+                    st.caption(f"Matched by {len(fp)} columns · {preview}")
+                st.markdown("")
+                if st.button(f"🗑  Delete  '{name}'", key=f"del_{name}"):
+                    del templates[name]
+                    save_templates(templates)
+                    st.rerun()
+
 st.divider()
-st.caption("TranZact · Item Master Converter · Auto-detects client formats · Saves templates for repeat clients")
+st.markdown(
+    '<p style="text-align:center;color:#444;font-size:0.78rem;margin:0;">'
+    'TranZact Ai &nbsp;·&nbsp; Master Data Converter &nbsp;·&nbsp; v2.0 &nbsp;·&nbsp; '
+    'Item Master &amp; Network Master</p>',
+    unsafe_allow_html=True
+)
