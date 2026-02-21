@@ -1034,41 +1034,39 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         f"{preview_text}\n\n"
         "Columns are labelled A, B, C... (A = index 0, B = index 1, ...).\n"
         "Rows are shown as actual Excel row numbers.\n\n"
-        "Your goal: understand how the file identifies FG (Finished Good) vs RM (Raw Material) rows, "
-        "then immediately output a JSON conversion spec.\n\n"
-        "The user will explain the logic in plain language. Extract from their description:\n"
-        "  1. Which column has the item name / description\n"
-        "  2. Which column has the quantity\n"
-        "  3. How FG vs RM rows are identified (font style, column value, indentation, level number, etc.)\n"
-        "  4. Which row is the header row\n\n"
-        "If the user's message contains enough information, output the JSON spec IMMEDIATELY — "
-        "do NOT ask follow-up questions unnecessarily. "
-        "Only ask a follow-up if something critical is genuinely missing or ambiguous. "
-        "Keep any follow-up to a single short question.\n\n"
-        "When you have all the information, respond with ONLY a raw JSON object "
-        "(no markdown, no extra text) in this shape:\n"
-        '{"ready":true,"header_row":<Excel row number minus 1>,"item_name_col":<0-indexed>,'
-        '"qty_col":<0-indexed>,"hierarchy_method":"column_value","hierarchy_col":<0-indexed>,'
-        '"fg_values":["FG"],"rm_values":["RM"],"sfg_values":["SFG"]}\n\n'
-        "For indentation-based hierarchy use:\n"
+        "Your goal: understand how the file identifies FG (Finished Good) vs RM (Raw Material) "
+        "rows, then immediately output a JSON conversion spec.\n\n"
+        "The user will describe the BOM logic in their own words — any format, any language. "
+        "Your job is to map their description to the right spec. "
+        "If the user's message has enough info, output the spec IMMEDIATELY. "
+        "Only ask ONE follow-up if something truly critical is missing.\n\n"
+        "Supported hierarchy methods and their spec shapes:\n\n"
+        "1. COLUMN VALUE — a column contains FG/RM/SFG or similar labels:\n"
         '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
-        '"hierarchy_method":"indentation","fg_indent":0,"rm_indent":4}\n\n'
-        "For font-based hierarchy (bold = FG, italic = RM, bold+italic = SFG) use:\n"
+        '"hierarchy_method":"column_value","hierarchy_col":<n>,'
+        '"fg_values":["FG"],"rm_values":["RM"],"sfg_values":["SFG"]}\n\n'
+        "2. FONT STYLE — bold=FG, italic=RM, bold+italic=SFG:\n"
         '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
         '"hierarchy_method":"font"}\n\n'
-        "For PRODUCTION TYPE column logic:\n"
-        "  - Main FG rows are identified by font/indent/column as usual.\n"
-        "  - Each sub-part (RM) row has a Production Type column.\n"
-        "  - BOUGHT OUT = direct RM (they purchase it).\n"
-        "  - SUB CONTRACT = SFG: they send an RM to a party and receive an SFG back, "
-        "which is used in the main FG. The SFG row is treated as RM under the parent FG "
-        "AND also gets its own FG entry in the output.\n"
-        "Use this spec shape:\n"
+        "3. INDENTATION — leading spaces distinguish FG from RM:\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"indentation","fg_indent":0,"rm_indent":4}\n\n'
+        "4. LEVEL NUMBER — a column has level numbers like 1, 2, 3 (or L1, L2) where 1=FG, 2+=RM:\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"level","level_col":<n>,'
+        '"fg_levels":[1,"1","L1"],"rm_levels":[2,3,"2","3","L2","L3"]}\n\n'
+        "5. HIERARCHICAL NUMBERING — item number column has 1, 1.1, 1.1.1 etc. "
+        "(top-level = FG, sub-levels = RM):\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"numbering","number_col":<n>}\n\n'
+        "6. PRODUCTION TYPE — sub-parts have a Production Type column; "
+        "BOUGHT OUT=direct RM, SUB CONTRACT=SFG (sent to party, received back):\n"
         '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
         '"hierarchy_method":"production_type","fg_identifier":"font",'
-        '"production_type_col":<0-indexed>,'
+        '"production_type_col":<n>,'
         '"bought_out_values":["BOUGHT OUT"],"sub_contract_values":["SUB CONTRACT"]}\n\n'
-        "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
+        "Pick the method that best matches the user's description. "
+        "If still unclear, ask exactly ONE brief question."
     )
 
     import time
@@ -1175,6 +1173,28 @@ def apply_bom_spec(file_bytes, spec):
             italic = bool(cell_name.font and cell_name.font.italic)
             is_fg  = bold and not italic
             is_rm  = italic
+
+        elif method == "level":
+            lv_col  = spec.get("level_col", 0)
+            lv_cell = row[lv_col] if lv_col < len(row) else None
+            lv_val  = str(lv_cell.value).strip() if (lv_cell and lv_cell.value is not None) else ""
+            fg_lvls = [str(v) for v in spec.get("fg_levels", ["1"])]
+            rm_lvls = [str(v) for v in spec.get("rm_levels", ["2", "3"])]
+            try:
+                lv_num = str(int(float(lv_val)))
+            except (ValueError, TypeError):
+                lv_num = lv_val
+            is_fg = lv_num in fg_lvls or lv_val in fg_lvls
+            is_rm = lv_num in rm_lvls or lv_val in rm_lvls
+
+        elif method == "numbering":
+            num_col  = spec.get("number_col", 0)
+            num_cell = row[num_col] if num_col < len(row) else None
+            num_val  = str(num_cell.value).strip() if (num_cell and num_cell.value is not None) else ""
+            # top-level = single integer like "1", "2" → FG; sub-level has dots "1.1" → RM
+            parts = num_val.split(".")
+            is_fg = len(parts) == 1 and parts[0].isdigit()
+            is_rm = len(parts) > 1
 
         elif method == "production_type":
             # FG identification uses fg_identifier (font/indent/column_value)
