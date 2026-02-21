@@ -726,12 +726,89 @@ def net_filename(fname):
 BOM_FG_HEADERS = [
     "Sl_No", "FG Item ID", "FG Item Name", "FG UOM", "BOM Number", "BOM Name",
     "FG Store", "RM Store", "Scrap Store", "BOM Description", "FG Cost Allocation",
-    "FG Comment", "Comment", "Drawing No", "Mark No", "SAP Design Code", "Concat", "Colour"
+    "FG Comment", "Comment"
 ]
 
 BOM_RM_HEADERS = [
     "Sl_No", "FG Item ID", "BOM Number", "#", "Item Id", "Item Description",
-    "Quantity", "Unit", "Comment", "NEW", "NEW FIELD", "CP CODE"
+    "Quantity", "Unit", "Comment"
+]
+
+BOM_SCRAP_HEADERS = [
+    "Sl_No", "FG Item ID", "BOM Number", "#", "Item Id", "Item Description",
+    "Quantity", "Unit", "Cost Allocation", "Comment"
+]
+
+BOM_ROUTING_HEADERS = [
+    "Sl_No", "FG Item ID", "BOM Number", "#", "Routing Number", "Routing Name", "Comment"
+]
+
+BOM_OTHER_CHARGES_HEADERS = [
+    "Sl_No", "FG Item ID", "BOM Number",
+    "Labour Cost", "Labour Comment",
+    "Machinery Cost", "Machinery Comment",
+    "Electricity Cost", "Electricity Comment",
+    "Other Cost", "Other Comment"
+]
+
+BOM_INSTRUCTIONS_HEADERS = [
+    "Sheet Name", "Field Name", "Data Type", "Mandatory (Yes/No)", "Comment"
+]
+
+BOM_INSTRUCTIONS_ROWS = [
+    ("FG",  "Serial Number",     "Integer", "Yes", "Use | for alternate item. Eg. 1 | 1"),
+    ("FG",  "FG Item ID",        "Text",    "Yes", ""),
+    ("FG",  "FG Item Name",      "Text",    "Yes", ""),
+    ("FG",  "FG UOM",            "Text",    "Yes", ""),
+    ("FG",  "BOM Number",        "Text",    "Yes", "Use BOM Series Name for automatic document series"),
+    ("FG",  "BOM Name",          "Text",    "Yes", ""),
+    ("FG",  "FG Store",          "Text",    "Yes", ""),
+    ("FG",  "RM Store",          "Text",    "Yes", ""),
+    ("FG",  "Scrap Store",       "Text",    "Yes", ""),
+    ("FG",  "BoM Description",   "Text",    "No",  ""),
+    ("FG",  "FG Cost Allocation","Float",   "Yes", ""),
+    ("FG",  "FG Comment",        "Text",    "No",  ""),
+    ("FG",  "CF1",               "Depends", "Depends", ""),
+    ("RM",  "Serial Number",     "Integer", "Yes", ""),
+    ("RM",  "FG Item ID",        "Text",    "Yes", ""),
+    ("RM",  "BOM Number",        "Text",    "No",  ""),
+    ("RM",  "#",                 "Integer", "Yes", "Use | for alternate item.  Eg. 1 | 1"),
+    ("RM",  "Item ID",           "Text",    "Yes", ""),
+    ("RM",  "Item Description",  "Text",    "Yes", ""),
+    ("RM",  "Quantity",          "Float",   "Yes", ""),
+    ("RM",  "Unit",              "Text",    "Yes", ""),
+    ("RM",  "Comment",           "Text",    "No",  ""),
+    ("RM",  "CF1",               "Depends", "Depends", ""),
+    ("Scrap", "Serial Number",   "Integer", "Yes", ""),
+    ("Scrap", "FG Item ID",      "Text",    "Yes", ""),
+    ("Scrap", "BOM Number",      "Text",    "No",  ""),
+    ("Scrap", "#",               "Integer", "Yes", ""),
+    ("Scrap", "Item ID",         "Text",    "Yes", ""),
+    ("Scrap", "Item Description","Text",    "No",  ""),
+    ("Scrap", "Quantity",        "Float",   "Yes", ""),
+    ("Scrap", "Unit",            "Text",    "Yes", ""),
+    ("Scrap", "Cost Allocation", "Float",   "Yes", ""),
+    ("Scrap", "Comment",         "Text",    "No",  ""),
+    ("Scrap", "CF1",             "Depends", "Depends", ""),
+    ("Routing", "Serial Number", "Integer", "Yes", ""),
+    ("Routing", "FG Item ID",    "Text",    "Yes", ""),
+    ("Routing", "BOM Number",    "Text",    "No",  ""),
+    ("Routing", "#",             "Integer", "Yes", ""),
+    ("Routing", "Routing Number","Text",    "Yes", ""),
+    ("Routing", "Routing Name",  "Text",    "Yes", ""),
+    ("Routing", "Comment",       "Text",    "No",  ""),
+    ("Other Charges", "Serial Number",       "Integer", "Yes", ""),
+    ("Other Charges", "FG Item ID",          "Text",    "Yes", ""),
+    ("Other Charges", "BOM Number",          "Text",    "No",  ""),
+    ("Other Charges", "Labour Cost",         "Float",   "Yes", ""),
+    ("Other Charges", "Labour Comment",      "Text",    "No",  ""),
+    ("Other Charges", "Machinery Cost",      "Float",   "Yes", ""),
+    ("Other Charges", "Machinery Comment",   "Text",    "No",  ""),
+    ("Other Charges", "Electricity Cost",    "Float",   "Yes", ""),
+    ("Other Charges", "Electricity Comment", "Text",    "No",  ""),
+    ("Other Charges", "Other Cost",          "Float",   "Yes", ""),
+    ("Other Charges", "Other Comment",       "Text",    "No",  ""),
+    ("Other Charges", "CF1",                 "Depends", "Depends", ""),
 ]
 
 
@@ -844,7 +921,7 @@ def parse_tally_bom(file_bytes):
 
 
 def make_bom_xlsx(fg_rows, rm_rows):
-    """Produce BulkUpload-format Excel (FG + RM + 4 empty sheets)."""
+    """Produce BulkUpload-format Excel (FG + RM + Scrap + Routing + Other Charges + Instructions)."""
     from openpyxl.styles import PatternFill, Font as XLFont
     RED_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
     RED_FONT = XLFont(color="FFFFFF", bold=True)
@@ -856,15 +933,16 @@ def make_bom_xlsx(fg_rows, rm_rows):
     duplicates = {n for n, c in name_count.items() if c > 1}
 
     wb    = Workbook()
+
+    # ── FG sheet ─────────────────────────────────────────────────────────
     ws_fg = wb.active
     ws_fg.title = "FG"
     ws_fg.append(BOM_FG_HEADERS)
-
     for r in fg_rows:
         ws_fg.append([
             r["Sl_No"], None, r["FG Item Name"], r["FG UOM"],
             None, r["BOM Name"], None, None, None, None,
-            r["FG Cost Allocation"], None, None, None, None, None, None, None,
+            r["FG Cost Allocation"], None, None,
         ])
         if r["FG Item Name"] in duplicates:
             rn = ws_fg.max_row
@@ -872,17 +950,32 @@ def make_bom_xlsx(fg_rows, rm_rows):
                 ws_fg.cell(row=rn, column=c).fill = RED_FILL
                 ws_fg.cell(row=rn, column=c).font = RED_FONT
 
+    # ── RM sheet ─────────────────────────────────────────────────────────
     ws_rm = wb.create_sheet("RM")
     ws_rm.append(BOM_RM_HEADERS)
     for r in rm_rows:
         ws_rm.append([
             r["Sl_No"], None, None, r["#"], None,
-            r["Item Description"], r["Quantity"], r["Unit"],
-            None, None, None, None,
+            r["Item Description"], r["Quantity"], r["Unit"], None,
         ])
 
-    for sname in ("Scrap", "Routing", "Other Charges", "Instructions"):
-        wb.create_sheet(sname)
+    # ── Scrap sheet ──────────────────────────────────────────────────────
+    ws_scrap = wb.create_sheet("Scrap")
+    ws_scrap.append(BOM_SCRAP_HEADERS)
+
+    # ── Routing sheet ────────────────────────────────────────────────────
+    ws_routing = wb.create_sheet("Routing")
+    ws_routing.append(BOM_ROUTING_HEADERS)
+
+    # ── Other Charges sheet ──────────────────────────────────────────────
+    ws_other = wb.create_sheet("Other Charges")
+    ws_other.append(BOM_OTHER_CHARGES_HEADERS)
+
+    # ── Instructions sheet ───────────────────────────────────────────────
+    ws_instr = wb.create_sheet("Instructions")
+    ws_instr.append(BOM_INSTRUCTIONS_HEADERS)
+    for row in BOM_INSTRUCTIONS_ROWS:
+        ws_instr.append(list(row))
 
     buf = io.BytesIO()
     wb.save(buf)
