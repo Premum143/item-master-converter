@@ -1025,7 +1025,8 @@ def get_bom_preview(file_bytes):
 
 def call_gemini_bom(api_key, chat_history, preview_text, fname):
     """Send chat history to Gemini and return the response text."""
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
 
     sys_prompt = (
         f"You are a BOM (Bill of Materials) conversion assistant for TranZact.\n\n"
@@ -1051,19 +1052,22 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
     )
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=sys_prompt
-    )
+    client = genai.Client(api_key=api_key)
 
-    # Build Gemini history from all but the last message
+    # Build history from all but the last message
     history = []
     for msg in chat_history[:-1]:
         role = "user" if msg["role"] == "user" else "model"
-        history.append({"role": role, "parts": [msg["content"]]})
+        history.append(types.Content(
+            role=role,
+            parts=[types.Part(text=msg["content"])]
+        ))
 
-    chat = model.start_chat(history=history)
+    chat = client.chats.create(
+        model="gemini-2.0-flash",
+        config=types.GenerateContentConfig(system_instruction=sys_prompt),
+        history=history
+    )
     response = chat.send_message(chat_history[-1]["content"])
     return response.text
 
