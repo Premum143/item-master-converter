@@ -987,6 +987,182 @@ def bom_filename(fname):
     cn = m.group(1) if m else fname.rsplit(".", 1)[0]
     return f"BOM_Upload_({cn}).xlsx"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI BOM converter helpers  (Other Formats — Gemini powered)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_bom_preview(file_bytes):
+    """
+    Return (preview_text_for_gemini, rows_for_display).
+    Shows up to 25 non-empty rows with actual Excel row numbers and column letters.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    ws = wb.active
+
+    rows_with_idx = []
+    for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=50, values_only=True), start=1):
+        if any(v is not None for v in row):
+            rows_with_idx.append((idx, list(row)))
+        if len(rows_with_idx) >= 25:
+            break
+
+    if not rows_with_idx:
+        return "Empty file.", []
+
+    max_cols = max(len(r) for _, r in rows_with_idx)
+    padded   = [(i, r + [None] * (max_cols - len(r))) for i, r in rows_with_idx]
+    col_labels = [chr(65 + i) for i in range(min(max_cols, 26))]
+
+    lines = ["Excel Row | " + " | ".join(col_labels)]
+    for idx, row in padded:
+        vals = [(str(v)[:25] if v is not None else "(blank)") for v in row]
+        lines.append(f"Row {idx:3d}   | " + " | ".join(vals))
+
+    display_rows = [r for _, r in padded]
+    return "\n".join(lines), display_rows
+
+
+def call_gemini_bom(api_key, chat_history, preview_text, fname):
+    """Send chat history to Gemini and return the response text."""
+    import google.generativeai as genai
+
+    sys_prompt = (
+        f"You are a BOM (Bill of Materials) conversion assistant for TranZact.\n\n"
+        f"The user uploaded a file named '{fname}'. Here is a preview:\n\n"
+        f"{preview_text}\n\n"
+        "Columns are labelled A, B, C... (A = index 0, B = index 1, ...).\n"
+        "Rows are shown as actual Excel row numbers.\n\n"
+        "Your goal: understand how the file identifies FG (Finished Good) vs RM (Raw Material) rows, "
+        "then output a JSON conversion spec.\n\n"
+        "Ask ONE short question at a time until you fully know:\n"
+        "  1. Which column has the item name / description\n"
+        "  2. Which column has the quantity\n"
+        "  3. How FG vs RM rows are identified — e.g. a column with values like FG/RM/SFG, "
+        "leading spaces/indentation, a level number (1/2/3), or any other indicator\n\n"
+        "When you have all the information, respond with ONLY a raw JSON object "
+        "(no markdown, no extra text) in this shape:\n"
+        '{"ready":true,"header_row":<Excel row number minus 1>,"item_name_col":<0-indexed>,'
+        '"qty_col":<0-indexed>,"hierarchy_method":"column_value","hierarchy_col":<0-indexed>,'
+        '"fg_values":["FG"],"rm_values":["RM"],"sfg_values":["SFG"]}\n\n'
+        "For indentation-based hierarchy use:\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"indentation","fg_indent":0,"rm_indent":4}\n\n'
+        "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
+    )
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        system_instruction=sys_prompt
+    )
+
+    # Build Gemini history from all but the last message
+    history = []
+    for msg in chat_history[:-1]:
+        role = "user" if msg["role"] == "user" else "model"
+        history.append({"role": role, "parts": [msg["content"]]})
+
+    chat = model.start_chat(history=history)
+    response = chat.send_message(chat_history[-1]["content"])
+    return response.text
+
+
+def extract_bom_spec(text):
+    """Extract JSON conversion spec from Gemini response text."""
+    import json
+    # Try ```json ... ``` block
+    m = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    # Try first JSON object in the text
+    m = re.search(r'\{.*\}', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return None
+
+
+def apply_bom_spec(file_bytes, spec):
+    """
+    Apply a Gemini-generated conversion spec to a BOM file.
+    Returns (fg_rows, rm_rows) in the same format as parse_tally_bom.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    ws = wb.active
+
+    header_row  = spec.get("header_row", 0)     # 0-indexed → openpyxl row = header_row+1
+    item_col    = spec.get("item_name_col", 0)
+    qty_col_idx = spec.get("qty_col", 1)
+    method      = spec.get("hierarchy_method", "column_value")
+    data_start  = header_row + 2                 # first data row in openpyxl (1-indexed)
+
+    fg_rows, rm_rows = [], []
+    fg_sl  = 0
+    parent = None
+    rm_seq = 0
+
+    for row in ws.iter_rows(min_row=data_start):
+        if item_col >= len(row):
+            continue
+        cell_name = row[item_col]
+        name = str(cell_name.value).strip() if cell_name.value not in (None, "") else ""
+        if not name:
+            continue
+
+        cell_qty = row[qty_col_idx] if qty_col_idx < len(row) else None
+        qty_raw  = cell_qty.value if cell_qty else None
+        is_fg = is_rm = False
+
+        if method == "column_value":
+            hier_col = spec.get("hierarchy_col", 0)
+            hcell    = row[hier_col] if hier_col < len(row) else None
+            hval     = str(hcell.value).strip().upper() if (hcell and hcell.value) else ""
+            fg_vals  = [v.upper() for v in spec.get("fg_values",  ["FG"])]
+            rm_vals  = [v.upper() for v in spec.get("rm_values",  ["RM"])] + \
+                       [v.upper() for v in spec.get("sfg_values", ["SFG"])]
+            is_fg = hval in fg_vals
+            is_rm = hval in rm_vals
+
+        elif method == "indentation":
+            fg_ind = spec.get("fg_indent", 0)
+            rm_ind = spec.get("rm_indent", 2)
+            raw    = str(cell_name.value) if cell_name.value else ""
+            leading = len(raw) - len(raw.lstrip())
+            is_fg = leading == fg_ind
+            is_rm = leading >= rm_ind
+
+        elif method == "font":
+            bold   = bool(cell_name.font and cell_name.font.bold)
+            italic = bool(cell_name.font and cell_name.font.italic)
+            is_fg  = bold and not italic
+            is_rm  = italic
+
+        if is_fg:
+            fg_sl += 1
+            _, uom = parse_qty_unit(qty_raw)
+            fg_rows.append({
+                "Sl_No": fg_sl, "FG Item Name": name,
+                "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
+            })
+            parent = fg_sl
+            rm_seq = 0
+        elif is_rm and parent is not None:
+            rm_seq += 1
+            qty, unit = parse_qty_unit(qty_raw)
+            rm_rows.append({
+                "Sl_No": parent, "#": rm_seq,
+                "Item Description": name, "Quantity": qty, "Unit": unit,
+            })
+
+    return fg_rows, rm_rows
+
+
 def read_sheet_rows(file_bytes, sheet_name=None):
     sheets = read_file(file_bytes)
     if sheet_name:
@@ -1422,7 +1598,123 @@ with tab3:
                 )
 
     else:
-        st.info("🚧  Other BOM formats coming soon.")
+        st.markdown(
+            "Upload any BOM file and **describe the logic in plain language** — "
+            "the AI assistant will ask clarifying questions, then convert it to the BulkUpload format."
+        )
+
+        # ── Gemini API key ────────────────────────────────────────────────
+        raw_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+        if not raw_key:
+            raw_key = st.text_input(
+                "Gemini API Key", type="password", key="gemini_key",
+                placeholder="Paste your Gemini API key",
+                label_visibility="collapsed"
+            )
+        api_key = raw_key.strip() if raw_key else ""
+
+        if not api_key:
+            st.info("Enter your Gemini API key above to get started.")
+        else:
+            other_up = st.file_uploader(
+                "Upload BOM file (any format)", type=["xlsx", "xls"],
+                key="other_bom_up", label_visibility="collapsed"
+            )
+
+            if other_up:
+                other_up.seek(0)
+                other_bytes = other_up.read()
+                other_fname = other_up.name
+
+                # Reset state on new file upload
+                if st.session_state.get("other_bom_fname") != other_fname:
+                    prev_text, prev_disp = get_bom_preview(other_bytes)
+                    st.session_state.other_bom_fname  = other_fname
+                    st.session_state.other_prev_text  = prev_text
+                    st.session_state.other_prev_disp  = prev_disp
+                    st.session_state.other_chat       = []
+                    st.session_state.other_spec       = None
+                    st.session_state.other_bom_out    = None
+
+                # ── File preview ──────────────────────────────────────────
+                with st.expander("📋  File preview", expanded=True):
+                    disp = st.session_state.other_prev_disp
+                    if disp:
+                        max_c = max(len(r) for r in disp)
+                        cols  = [chr(65 + i) for i in range(min(max_c, 26))]
+                        table = [
+                            {"Row": i + 1, **{cols[j]: (v if v is not None else "") for j, v in enumerate(r)}}
+                            for i, r in enumerate(disp)
+                        ]
+                        st.dataframe(table, use_container_width=True, hide_index=True)
+
+                # ── Chat history ──────────────────────────────────────────
+                for msg in st.session_state.other_chat:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+
+                # ── Ready to convert ──────────────────────────────────────
+                if st.session_state.other_spec:
+                    st.success("✅  Logic understood — ready to convert.")
+                    if st.button("▶  Convert Now", type="primary",
+                                 use_container_width=True, key="other_go"):
+                        with st.spinner("Converting…"):
+                            try:
+                                fg_r, rm_r = apply_bom_spec(
+                                    other_bytes, st.session_state.other_spec
+                                )
+                                st.session_state.other_bom_out      = make_bom_xlsx(fg_r, rm_r)
+                                st.session_state.other_bom_out_name = bom_filename(other_fname)
+                                st.session_state.other_counts       = (len(fg_r), len(rm_r))
+                            except Exception as e:
+                                st.error(f"❌  Conversion failed: {e}")
+
+                    if st.session_state.get("other_bom_out"):
+                        fg_c, rm_c = st.session_state.other_counts
+                        st.success(f"✅  **{fg_c} FG items** and **{rm_c} RM entries** converted!")
+                        st.download_button(
+                            "⬇️  Download BOM Upload File",
+                            data=st.session_state.other_bom_out,
+                            file_name=st.session_state.other_bom_out_name,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary", use_container_width=True, key="other_dl"
+                        )
+
+                # ── Chat input (shown until spec is ready) ────────────────
+                else:
+                    prompt = st.chat_input(
+                        "Describe the BOM logic or answer the question above…",
+                        key="other_chat_input"
+                    )
+                    if prompt:
+                        st.session_state.other_chat.append(
+                            {"role": "user", "content": prompt}
+                        )
+                        with st.spinner("Thinking…"):
+                            try:
+                                reply = call_gemini_bom(
+                                    api_key,
+                                    st.session_state.other_chat,
+                                    st.session_state.other_prev_text,
+                                    other_fname
+                                )
+                            except Exception as e:
+                                reply = f"⚠️  API error: {e}"
+
+                        spec = extract_bom_spec(reply)
+                        if spec and spec.get("ready"):
+                            st.session_state.other_spec = spec
+                            display = (
+                                "Got it! I fully understand the format. "
+                                "Click **▶ Convert Now** to proceed."
+                            )
+                        else:
+                            display = reply
+
+                        st.session_state.other_chat.append(
+                            {"role": "assistant", "content": display}
+                        )
+                        st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 4 : Templates
