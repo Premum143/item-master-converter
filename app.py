@@ -760,31 +760,62 @@ def parse_qty_unit(value):
 
 def parse_tally_bom(file_bytes):
     """
-    Parse Tally BOM Excel (Item Estimates sheet, data starts row 6).
-    Font style determines row type:
+    Parse Tally BOM Excel (Item Estimates sheet).
+
+    Supports two Tally export layouts automatically:
+      Layout A (e.g. Velvu):  Col A = Particulars, Col B = Qty   — header ~row 5
+      Layout B (e.g. TZ):     Col A = Item Code,   Col B = Particulars, Col C = Qty — header ~row 8
+
+    Detection: scan first 15 rows for a cell whose value is "Particulars".
+    That cell's column index becomes part_col; the adjacent "Qty" column becomes qty_col.
+    Font is always read from the Particulars column cell.
+
+    Font rules:
       Bold only       → FG  (new parent)
       Italic only     → RM of current parent
-      Bold + Italic   → SFG: added as RM of current parent (parent unchanged)
+      Bold + Italic   → SFG: added as RM of current parent (parent context unchanged)
+
     Returns (fg_rows, rm_rows) as lists of dicts.
     """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws = wb["Item Estimates"] if "Item Estimates" in wb.sheetnames else wb.active
 
+    # ── Auto-detect header row & column positions ─────────────────────
+    part_col   = 0   # index of Particulars column (item name)
+    qty_col    = 1   # index of Qty column
+    data_start = 6   # fallback: row after header
+
+    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=15), start=1):
+        for ci, cell in enumerate(row):
+            if cell.value and str(cell.value).strip().lower() == "particulars":
+                part_col   = ci
+                data_start = row_idx + 1
+                # Find Qty in the same header row
+                for cj, hcell in enumerate(row):
+                    if hcell.value and str(hcell.value).strip().lower() in ("qty", "quantity"):
+                        qty_col = cj
+                break
+        if data_start != 6:
+            break
+
+    # ── Parse data rows ───────────────────────────────────────────────
     fg_rows, rm_rows = [], []
     fg_sl  = 0
     parent = None
     rm_seq = 0
 
-    for row in ws.iter_rows(min_row=6):
-        cell_name = row[0]
-        cell_qty  = row[1] if len(row) > 1 else None
+    for row in ws.iter_rows(min_row=data_start):
+        if part_col >= len(row):
+            continue
+        cell_part = row[part_col]
+        cell_qty  = row[qty_col] if qty_col < len(row) else None
 
-        name = str(cell_name.value).strip() if cell_name.value not in (None, "") else ""
+        name = str(cell_part.value).strip() if cell_part.value not in (None, "") else ""
         if not name:
             continue
 
-        bold   = bool(cell_name.font and cell_name.font.bold)
-        italic = bool(cell_name.font and cell_name.font.italic)
+        bold    = bool(cell_part.font and cell_part.font.bold)
+        italic  = bool(cell_part.font and cell_part.font.italic)
         qty_raw = cell_qty.value if cell_qty else None
 
         if bold and not italic:
