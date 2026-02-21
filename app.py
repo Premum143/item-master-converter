@@ -430,6 +430,23 @@ def load_pincode_db():
             return json.load(f)
     return {}
 
+GSTIN_STATE_MAP = {
+    "01":"Jammu & Kashmir","02":"Himachal Pradesh","03":"Punjab","04":"Chandigarh",
+    "05":"Uttarakhand","06":"Haryana","07":"Delhi","08":"Rajasthan","09":"Uttar Pradesh",
+    "10":"Bihar","11":"Sikkim","12":"Arunachal Pradesh","13":"Nagaland","14":"Manipur",
+    "15":"Mizoram","16":"Tripura","17":"Meghalaya","18":"Assam","19":"West Bengal",
+    "20":"Jharkhand","21":"Odisha","22":"Chhattisgarh","23":"Madhya Pradesh",
+    "24":"Gujarat","25":"Daman and Diu","26":"Dadra and Nagar Haveli","27":"Maharashtra",
+    "28":"Andhra Pradesh","29":"Karnataka","30":"Goa","31":"Lakshadweep","32":"Kerala",
+    "33":"Tamil Nadu","34":"Puducherry","35":"Andaman and Nicobar Islands",
+    "36":"Telangana","37":"Andhra Pradesh","38":"Ladakh","97":"Other Territory",
+}
+
+def state_from_gstin(gstin):
+    if gstin and len(gstin) >= 2:
+        return GSTIN_STATE_MAP.get(gstin[:2].zfill(2))
+    return None
+
 def clean_gstin(v):
     if not v:
         return None
@@ -444,11 +461,26 @@ def clean_pin(v):
     digits = re.sub(r"[^\d]", "", str(v).strip())
     return digits[:6] if len(digits) >= 6 else (digits if digits else None)
 
+_NAME_PREFIXES = {
+    "mr", "mrs", "ms", "dr", "shri", "smt", "prof",
+    "er", "ca", "cs", "adv", "col", "capt", "gen", "lt"
+}
+
 def split_name(full):
     if not full:
         return None, None
-    parts = full.strip().split(None, 1)
-    return (parts[0], parts[1]) if len(parts) == 2 else (parts[0], None)
+    # Remove numeric values (phone numbers, IDs embedded in name)
+    s = re.sub(r'\b\d+\b', '', full).strip()
+    # Normalize spaces
+    parts = s.split()
+    # Strip honorific prefixes (Mr. / Mrs. / Dr. etc.)
+    while parts and re.sub(r'[.\s]', '', parts[0]).lower() in _NAME_PREFIXES:
+        parts = parts[1:]
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], " ".join(parts[1:])
 
 def parse_mshriy_address(addr_str):
     """
@@ -562,6 +594,10 @@ def convert_tally_parties(rows, header_idx):
         email  = _g(row, col, "$email", "$Email")
         fname, lname = split_name(_g(row, col, "$LedgerContact"))
 
+        # Fill state from GSTIN if still missing
+        if not state and gstin:
+            state = state_from_gstin(gstin)
+
         parties.append({
             "Company Name": name,
             "Buyer/Supplier/Both": party_type,
@@ -607,6 +643,10 @@ def convert_mshriy_parties(rows, header_idx):
         gstin  = clean_gstin(_g(row, col, "GSTIN/UIN", "GSTIN"))
         email  = _g(row, col, "Mail ID", "Email")
         mobile = _g(row, col, "Contact No.", "Mobile", "Phone")
+
+        # Fill state from GSTIN if missing
+        if not state and gstin:
+            state = state_from_gstin(gstin)
 
         parties.append({
             "Company Name": name,
