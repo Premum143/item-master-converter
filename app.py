@@ -1056,6 +1056,18 @@ def call_gemini_bom(api_key, chat_history, preview_text, fname):
         "For font-based hierarchy (bold = FG, italic = RM, bold+italic = SFG) use:\n"
         '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
         '"hierarchy_method":"font"}\n\n'
+        "For PRODUCTION TYPE column logic:\n"
+        "  - Main FG rows are identified by font/indent/column as usual.\n"
+        "  - Each sub-part (RM) row has a Production Type column.\n"
+        "  - BOUGHT OUT = direct RM (they purchase it).\n"
+        "  - SUB CONTRACT = SFG: they send an RM to a party and receive an SFG back, "
+        "which is used in the main FG. The SFG row is treated as RM under the parent FG "
+        "AND also gets its own FG entry in the output.\n"
+        "Use this spec shape:\n"
+        '{"ready":true,"header_row":<n>,"item_name_col":<n>,"qty_col":<n>,'
+        '"hierarchy_method":"production_type","fg_identifier":"font",'
+        '"production_type_col":<0-indexed>,'
+        '"bought_out_values":["BOUGHT OUT"],"sub_contract_values":["SUB CONTRACT"]}\n\n'
         "If still gathering info, ask exactly ONE brief question. Keep all replies concise."
     )
 
@@ -1163,6 +1175,50 @@ def apply_bom_spec(file_bytes, spec):
             italic = bool(cell_name.font and cell_name.font.italic)
             is_fg  = bold and not italic
             is_rm  = italic
+
+        elif method == "production_type":
+            # FG identification uses fg_identifier (font/indent/column_value)
+            fg_id = spec.get("fg_identifier", "font")
+            if fg_id == "font":
+                bold  = bool(cell_name.font and cell_name.font.bold)
+                italic = bool(cell_name.font and cell_name.font.italic)
+                is_fg = bold and not italic
+            elif fg_id == "indentation":
+                raw = str(cell_name.value) if cell_name.value else ""
+                is_fg = (len(raw) - len(raw.lstrip())) == spec.get("fg_indent", 0)
+            elif fg_id == "column_value":
+                hcol  = spec.get("hierarchy_col", 0)
+                hcell = row[hcol] if hcol < len(row) else None
+                hval  = str(hcell.value).strip().upper() if (hcell and hcell.value) else ""
+                is_fg = hval in [v.upper() for v in spec.get("fg_values", ["FG"])]
+
+            if not is_fg:
+                pt_col  = spec.get("production_type_col", -1)
+                pt_cell = row[pt_col] if (pt_col >= 0 and pt_col < len(row)) else None
+                pt_val  = str(pt_cell.value).strip().upper() if (pt_cell and pt_cell.value) else ""
+                bo_vals  = [v.upper() for v in spec.get("bought_out_values",  ["BOUGHT OUT"])]
+                sc_vals  = [v.upper() for v in spec.get("sub_contract_values", ["SUB CONTRACT"])]
+
+                if pt_val in bo_vals:
+                    is_rm = True          # direct RM — purchased as-is
+                elif pt_val in sc_vals:
+                    # SFG: add as RM under parent FG AND as its own FG entry
+                    if parent is not None:
+                        rm_seq += 1
+                        qty, unit = parse_qty_unit(qty_raw)
+                        rm_rows.append({
+                            "Sl_No": parent, "#": rm_seq,
+                            "Item Description": name, "Quantity": qty, "Unit": unit,
+                        })
+                    fg_sl += 1
+                    _, uom = parse_qty_unit(qty_raw)
+                    fg_rows.append({
+                        "Sl_No": fg_sl, "FG Item Name": name,
+                        "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
+                    })
+                    parent = fg_sl
+                    rm_seq = 0
+                    continue   # already handled, skip generic is_fg/is_rm block
 
         if is_fg:
             fg_sl += 1
