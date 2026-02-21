@@ -410,6 +410,275 @@ def out_filename(fname):
     cn = m.group(1) if m else fname.rsplit('.', 1)[0]
     return f"Product_Add_({cn}).xlsx"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Network Master helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+NETWORK_OUT_HEADERS = [
+    "Company Name", "Buyer/Supplier/Both", "Company Reference ID",
+    "TCS Type", "Company Email", "Company Contact Number",
+    "Address Line 1", "Address Line 2", "City", "State", "Country",
+    "PIN Code", "GSTIN", "GSTIN Type",
+    "Contact Person First Name", "Contact Person Last Name", "Contact Person Email"
+]
+
+@st.cache_data(show_spinner=False)
+def load_pincode_db():
+    path = os.path.join(SCRIPT_DIR, "pincode_db.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def clean_gstin(v):
+    if not v:
+        return None
+    s = str(v).strip()
+    if s.lower() in ("none", "n/a", "", "0"):
+        return None
+    return s
+
+def clean_pin(v):
+    if not v:
+        return None
+    digits = re.sub(r"[^\d]", "", str(v).strip())
+    return digits[:6] if len(digits) >= 6 else (digits if digits else None)
+
+def split_name(full):
+    if not full:
+        return None, None
+    parts = full.strip().split(None, 1)
+    return (parts[0], parts[1]) if len(parts) == 2 else (parts[0], None)
+
+def parse_mshriy_address(addr_str):
+    """
+    Parse a combined address like
+    'D 24, SUNPLAZA, VADSAR ROAD, Vadodara, Gujarat, 390010'
+    into (addr1, addr2, city, state, pincode).
+    Convention: last = pincode, prev = state, prev-prev = city, rest = address.
+    """
+    if not addr_str:
+        return None, None, None, None, None
+    parts = [p.strip() for p in addr_str.split(",") if p.strip()]
+    pincode = city = state = None
+
+    # Find pincode — last purely-numeric 6-digit segment
+    pin_idx = None
+    for i in range(len(parts) - 1, -1, -1):
+        d = re.sub(r"[^\d]", "", parts[i])
+        if len(d) == 6:
+            pincode = d
+            pin_idx = i
+            break
+
+    if pin_idx is not None and pin_idx >= 2:
+        state = parts[pin_idx - 1]
+        city  = parts[pin_idx - 2]
+        addr_parts = parts[: pin_idx - 2]
+    elif pin_idx is not None and pin_idx == 1:
+        state = parts[0]
+        addr_parts = []
+    else:
+        addr_parts = parts[: pin_idx] if pin_idx else parts
+
+    # Split address into two lines at midpoint
+    if not addr_parts:
+        addr1 = addr2 = None
+    elif len(addr_parts) == 1:
+        addr1, addr2 = addr_parts[0], None
+    else:
+        mid = max(1, len(addr_parts) // 2)
+        addr1 = ", ".join(addr_parts[:mid]) or None
+        addr2 = ", ".join(addr_parts[mid:]) or None
+
+    return addr1, addr2, city, state, pincode
+
+def _tally_detect_sheet(sheets):
+    """Pick the SVNaturalLanguage sheet from Tally exports, else most populated."""
+    if "SVNaturalLanguage" in sheets:
+        return "SVNaturalLanguage"
+    for name, rows in sheets.items():
+        for row in rows[:5]:
+            vals = [str(v).lower() for v in row if v]
+            if any("$name" in v for v in vals):
+                return name
+    return pick_sheet(sheets)
+
+def detect_network_format(rows):
+    """
+    Returns ('tally', header_idx) or ('mshriy', header_idx) or ('unknown', 0).
+    """
+    for i, row in enumerate(rows[:15]):
+        vals = [str(v).strip().lower() for v in row if v is not None and str(v).strip()]
+        joined = " ".join(vals)
+        if "$name" in joined or "$_primarygroup" in joined:
+            return "tally", i
+        if "name of ledger" in joined or ("sl" in joined and "name" in joined):
+            return "mshriy", i
+    return "unknown", 0
+
+def _g(row, col_map, *keys):
+    """Get first non-empty value from row by column name keys."""
+    for k in keys:
+        i = col_map.get(k)
+        if i is not None and i < len(row):
+            v = row[i]
+            if v is not None:
+                s = clean(str(v))
+                if s and s.lower() not in ("none", "0.00", "0"):
+                    return s
+    return None
+
+def convert_tally_parties(rows, header_idx):
+    hdrs = [str(v).strip() if v is not None else "" for v in rows[header_idx]]
+    col  = {h: i for i, h in enumerate(hdrs)}
+    parties = []
+
+    for row in rows[header_idx + 1:]:
+        if not row or all(v is None or str(v).strip() == "" for v in row):
+            continue
+        name = _g(row, col, "$Name")
+        if not name:
+            continue
+
+        group   = _g(row, col, "$_PrimaryGroup") or ""
+        group_l = group.lower()
+        if "sundry debtor" in group_l:
+            party_type, is_red = "Buyer", False
+        elif "sundry creditor" in group_l:
+            party_type, is_red = "Supplier", False
+        else:
+            party_type, is_red = group, True
+
+        addr1  = _g(row, col, "$_Address1")
+        addr2  = _g(row, col, "$_Address2")
+        addr3  = _g(row, col, "$_Address3")
+        addr2  = (addr2 + ", " + addr3) if addr2 and addr3 else (addr2 or addr3)
+        state  = _g(row, col, "$PriorStateName")
+        country= _g(row, col, "$CountryName") or "India"
+        pin    = clean_pin(_g(row, col, "$pincode", "$Pincode"))
+        gstin  = clean_gstin(_g(row, col, "$_PartyGSTIN", "$PartyGSTIN"))
+        mobile = _g(row, col, "$LedgerMobile")
+        email  = _g(row, col, "$email", "$Email")
+        fname, lname = split_name(_g(row, col, "$LedgerContact"))
+
+        parties.append({
+            "Company Name": name,
+            "Buyer/Supplier/Both": party_type,
+            "Company Reference ID": None, "TCS Type": None,
+            "Company Email": email,
+            "Company Contact Number": mobile,
+            "Address Line 1": addr1, "Address Line 2": addr2,
+            "City": None, "State": state, "Country": country,
+            "PIN Code": pin,
+            "GSTIN": gstin, "GSTIN Type": "Regular" if gstin else None,
+            "Contact Person First Name": fname,
+            "Contact Person Last Name": lname,
+            "Contact Person Email": None,
+            "_is_red": is_red,
+        })
+    return parties
+
+def convert_mshriy_parties(rows, header_idx):
+    hdrs = [str(v).strip() if v is not None else "" for v in rows[header_idx]]
+    col  = {h: i for i, h in enumerate(hdrs)}
+    parties = []
+
+    for row in rows[header_idx + 1:]:
+        if not row or all(v is None or str(v).strip() == "" for v in row):
+            continue
+        name = _g(row, col, "Name of Ledger")
+        if not name:
+            continue
+
+        group   = _g(row, col, "Under") or ""
+        group_l = group.lower()
+        if "sundry debtor" in group_l:
+            party_type, is_red = "Buyer", False
+        elif "sundry creditor" in group_l:
+            party_type, is_red = "Supplier", False
+        else:
+            party_type, is_red = group, True
+
+        addr_raw              = _g(row, col, "Address")
+        addr1, addr2, city, state_p, pin_p = parse_mshriy_address(addr_raw)
+        state  = _g(row, col, "State Name") or state_p
+        pin    = clean_pin(_g(row, col, "Pincode", "PIN", "Pin Code")) or clean_pin(pin_p)
+        gstin  = clean_gstin(_g(row, col, "GSTIN/UIN", "GSTIN"))
+        email  = _g(row, col, "Mail ID", "Email")
+        mobile = _g(row, col, "Contact No.", "Mobile", "Phone")
+
+        parties.append({
+            "Company Name": name,
+            "Buyer/Supplier/Both": party_type,
+            "Company Reference ID": None, "TCS Type": None,
+            "Company Email": email,
+            "Company Contact Number": mobile,
+            "Address Line 1": addr1, "Address Line 2": addr2,
+            "City": city, "State": state, "Country": "India",
+            "PIN Code": pin,
+            "GSTIN": gstin, "GSTIN Type": "Regular" if gstin else None,
+            "Contact Person First Name": None,
+            "Contact Person Last Name": None, "Contact Person Email": None,
+            "_is_red": is_red,
+        })
+    return parties
+
+def apply_pincode_lookup(parties, pincode_db):
+    for p in parties:
+        pin = p.get("PIN Code")
+        if pin:
+            entry = pincode_db.get(str(pin).zfill(6))
+            if entry:
+                if not p.get("City"):
+                    p["City"] = entry.get("c") or None
+                if not p.get("State"):
+                    p["State"] = entry.get("s") or None
+    return parties
+
+def split_network_sheets(parties):
+    """
+    Sheet 1 (Ready to upload)  : Address Line 1 AND PIN Code both present
+    Sheet 2 (Have GSTIN)       : Not in sheet 1, but GSTIN present
+    Sheet 3 (Need to update manually): everything else
+    """
+    ready, have_gstin, manual = [], [], []
+    for p in parties:
+        if p.get("Address Line 1") and p.get("PIN Code"):
+            ready.append(p)
+        elif p.get("GSTIN"):
+            have_gstin.append(p)
+        else:
+            manual.append(p)
+    return ready, have_gstin, manual
+
+def make_network_xlsx(ready, have_gstin, manual):
+    from openpyxl.styles import PatternFill
+    RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+
+    wb  = Workbook()
+    def write_sheet(ws, parties):
+        ws.append(NETWORK_OUT_HEADERS)
+        for p in parties:
+            ws.append([p.get(h) for h in NETWORK_OUT_HEADERS])
+            if p.get("_is_red"):
+                r = ws.max_row
+                for c in range(1, len(NETWORK_OUT_HEADERS) + 1):
+                    ws.cell(row=r, column=c).fill = RED_FILL
+
+    ws1 = wb.active;  ws1.title = "Ready to upload";     write_sheet(ws1, ready)
+    ws2 = wb.create_sheet("Have GSTIN");                  write_sheet(ws2, have_gstin)
+    ws3 = wb.create_sheet("Need to update manually");     write_sheet(ws3, manual)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+def net_filename(fname):
+    m  = re.search(r"\(([^)]+)\)", fname)
+    cn = m.group(1) if m else fname.rsplit(".", 1)[0]
+    return f"Network_Add_({cn}).xlsx"
+
 def read_sheet_rows(file_bytes, sheet_name=None):
     sheets = read_file(file_bytes)
     if sheet_name:
@@ -515,7 +784,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.divider()
-tab1, tab2, tab3 = st.tabs(["📥  Client → My Format", "📤  My Format → Tally", "🗂  Templates"])
+tab1, tab2, tab3, tab4 = st.tabs(["📥  Item Master", "📤  My Format → Tally", "🗂  Templates", "🏢  Network Master"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 : Any client format  →  Product_Add_(X).xlsx
@@ -737,6 +1006,88 @@ with tab3:
                     del templates[name]
                     save_templates(templates)
                     st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4 : Network Master  →  Network_Add_(X).xlsx
+# ─────────────────────────────────────────────────────────────────────────────
+with tab4:
+    st.markdown("Upload a client ledger / vendor file — auto-converts to your **Network Add** format.")
+    st.markdown(
+        "**Output has 3 sheets:** &nbsp; ✅ Ready to upload &nbsp;·&nbsp; 🔑 Have GSTIN &nbsp;·&nbsp; ✏️ Need to update manually",
+        unsafe_allow_html=True
+    )
+
+    net_up = st.file_uploader("Upload client file", type=["xlsx", "xls"], key="net_up",
+                               label_visibility="collapsed")
+
+    if net_up:
+        net_up.seek(0)
+        net_bytes = net_up.read()
+        net_fname = net_up.name
+
+        if st.session_state.get("net_fname") != net_fname:
+            try:
+                sheets   = read_file(net_bytes)
+                sname    = _tally_detect_sheet(sheets)
+                rows     = sheets[sname]
+                fmt, hidx = detect_network_format(rows)
+                st.session_state.net_fname  = net_fname
+                st.session_state.net_rows   = rows
+                st.session_state.net_hidx   = hidx
+                st.session_state.net_fmt    = fmt
+                st.session_state.net_out    = None
+            except Exception as e:
+                st.error(f"❌  Could not read file: {e}")
+                st.stop()
+
+        rows  = st.session_state.net_rows
+        hidx  = st.session_state.net_hidx
+        fmt   = st.session_state.net_fmt
+
+        st.success(f"✅  **{net_fname}** uploaded")
+        fmt_label = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "unknown": "Unknown"}
+        st.caption(f"Detected format: **{fmt_label.get(fmt, fmt)}**")
+
+        if fmt == "unknown":
+            st.warning("⚠️  Could not detect file format. Please check the file.")
+        else:
+            if st.button("▶  Convert Now", type="primary",
+                         use_container_width=True, key="net_go"):
+                with st.spinner("Converting…"):
+                    try:
+                        if fmt == "tally":
+                            parties = convert_tally_parties(rows, hidx)
+                        else:
+                            parties = convert_mshriy_parties(rows, hidx)
+
+                        pindb   = load_pincode_db()
+                        parties = apply_pincode_lookup(parties, pindb)
+                        ready, have_gstin, manual = split_network_sheets(parties)
+
+                        st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual)
+                        st.session_state.net_out_name = net_filename(net_fname)
+                        st.session_state.net_counts   = (len(ready), len(have_gstin), len(manual))
+                    except Exception as e:
+                        st.error(f"❌  Something went wrong: {e}")
+
+        if st.session_state.get("net_out") and st.session_state.get("net_fname") == net_fname:
+            r, g, m = st.session_state.net_counts
+            c1, c2, c3 = st.columns(3)
+            c1.metric("✅ Ready to upload", r)
+            c2.metric("🔑 Have GSTIN", g)
+            c3.metric("✏️ Need to update manually", m)
+
+            st.info("🔴  Rows highlighted in red = non-standard party type (not Sundry Debtors/Creditors) — review with client.")
+
+            st.download_button(
+                "⬇️  Download Network Add File",
+                data=st.session_state.net_out,
+                file_name=st.session_state.net_out_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+                key="net_dl"
+            )
 
 st.divider()
 st.caption("TranZact · Item Master Converter · Auto-detects client formats · Saves templates for repeat clients")
