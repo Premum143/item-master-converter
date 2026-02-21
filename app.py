@@ -719,6 +719,150 @@ def net_filename(fname):
     cn = m.group(1) if m else fname.rsplit(".", 1)[0]
     return f"Network_Add_({cn}).xlsx"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# BOM Upload helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+BOM_FG_HEADERS = [
+    "Sl_No", "FG Item ID", "FG Item Name", "FG UOM", "BOM Number", "BOM Name",
+    "FG Store", "RM Store", "Scrap Store", "BOM Description", "FG Cost Allocation",
+    "FG Comment", "Comment", "Drawing No", "Mark No", "SAP Design Code", "Concat", "Colour"
+]
+
+BOM_RM_HEADERS = [
+    "Sl_No", "FG Item ID", "BOM Number", "#", "Item Id", "Item Description",
+    "Quantity", "Unit", "Comment", "NEW", "NEW FIELD", "CP CODE"
+]
+
+
+def parse_qty_unit(value):
+    """Parse '1PCS' → (1, 'PCS'), '0.002KGS' → (0.002, 'KGS'), '1' → (1, 'PCS')."""
+    if value is None:
+        return 1, "PCS"
+    s = str(value).strip()
+    if not s:
+        return 1, "PCS"
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*([A-Za-z]*)$', s)
+    if m:
+        try:
+            qty = float(m.group(1))
+            qty = int(qty) if qty == int(qty) else qty
+        except ValueError:
+            qty = 1
+        unit = m.group(2).upper().strip() or "PCS"
+        return qty, unit
+    try:
+        qty = float(s)
+        return (int(qty) if qty == int(qty) else qty), "PCS"
+    except (ValueError, TypeError):
+        return 1, "PCS"
+
+
+def parse_tally_bom(file_bytes):
+    """
+    Parse Tally BOM Excel (Item Estimates sheet, data starts row 6).
+    Font style determines row type:
+      Bold only       → FG  (new parent)
+      Italic only     → RM of current parent
+      Bold + Italic   → SFG: added as RM of current parent (parent unchanged)
+    Returns (fg_rows, rm_rows) as lists of dicts.
+    """
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    ws = wb["Item Estimates"] if "Item Estimates" in wb.sheetnames else wb.active
+
+    fg_rows, rm_rows = [], []
+    fg_sl  = 0
+    parent = None
+    rm_seq = 0
+
+    for row in ws.iter_rows(min_row=6):
+        cell_name = row[0]
+        cell_qty  = row[1] if len(row) > 1 else None
+
+        name = str(cell_name.value).strip() if cell_name.value not in (None, "") else ""
+        if not name:
+            continue
+
+        bold   = bool(cell_name.font and cell_name.font.bold)
+        italic = bool(cell_name.font and cell_name.font.italic)
+        qty_raw = cell_qty.value if cell_qty else None
+
+        if bold and not italic:
+            # ── FG ──────────────────────────────────────────────────────
+            fg_sl += 1
+            _, uom = parse_qty_unit(qty_raw)
+            fg_rows.append({
+                "Sl_No": fg_sl, "FG Item Name": name,
+                "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
+            })
+            parent = fg_sl
+            rm_seq = 0
+
+        elif italic:
+            # ── RM or SFG-as-RM ─────────────────────────────────────────
+            if parent is None:
+                continue
+            rm_seq += 1
+            qty, unit = parse_qty_unit(qty_raw)
+            rm_rows.append({
+                "Sl_No": parent, "#": rm_seq,
+                "Item Description": name, "Quantity": qty, "Unit": unit,
+            })
+
+    return fg_rows, rm_rows
+
+
+def make_bom_xlsx(fg_rows, rm_rows):
+    """Produce BulkUpload-format Excel (FG + RM + 4 empty sheets)."""
+    from openpyxl.styles import PatternFill, Font as XLFont
+    RED_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+    RED_FONT = XLFont(color="FFFFFF", bold=True)
+
+    name_count = {}
+    for r in fg_rows:
+        n = r["FG Item Name"]
+        name_count[n] = name_count.get(n, 0) + 1
+    duplicates = {n for n, c in name_count.items() if c > 1}
+
+    wb    = Workbook()
+    ws_fg = wb.active
+    ws_fg.title = "FG"
+    ws_fg.append(BOM_FG_HEADERS)
+
+    for r in fg_rows:
+        ws_fg.append([
+            r["Sl_No"], None, r["FG Item Name"], r["FG UOM"],
+            None, r["BOM Name"], None, None, None, None,
+            r["FG Cost Allocation"], None, None, None, None, None, None, None,
+        ])
+        if r["FG Item Name"] in duplicates:
+            rn = ws_fg.max_row
+            for c in range(1, len(BOM_FG_HEADERS) + 1):
+                ws_fg.cell(row=rn, column=c).fill = RED_FILL
+                ws_fg.cell(row=rn, column=c).font = RED_FONT
+
+    ws_rm = wb.create_sheet("RM")
+    ws_rm.append(BOM_RM_HEADERS)
+    for r in rm_rows:
+        ws_rm.append([
+            r["Sl_No"], None, None, r["#"], None,
+            r["Item Description"], r["Quantity"], r["Unit"],
+            None, None, None, None,
+        ])
+
+    for sname in ("Scrap", "Routing", "Other Charges", "Instructions"):
+        wb.create_sheet(sname)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def bom_filename(fname):
+    m  = re.search(r"\(([^)]+)\)", fname)
+    cn = m.group(1) if m else fname.rsplit(".", 1)[0]
+    return f"BOM_Upload_({cn}).xlsx"
+
 def read_sheet_rows(file_bytes, sheet_name=None):
     sheets = read_file(file_bytes)
     if sheet_name:
@@ -863,12 +1007,13 @@ st.markdown("""
   <span style="color:#aaaca6;font-size:0.88rem;">Master Data Converter</span>
   <span class="pill">📦 Item Master</span>
   <span class="pill">🏢 Network Master</span>
-  <span class="pill">⚡ Auto-detects any client format</span>
+  <span class="pill">🧩 BOM Upload</span>
+  <span class="pill">⚡ Auto-detects any format</span>
 </div>
 """, unsafe_allow_html=True)
 
 st.divider()
-tab1, tab2, tab3 = st.tabs(["📦  Item Master", "🏢  Network Master", "🗂  Templates"])
+tab1, tab2, tab3, tab4 = st.tabs(["📦  Item Master", "🏢  Network Master", "🧩  BOM Upload", "🗂  Templates"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 : Any client format  →  Product_Add_(X).xlsx
@@ -1069,9 +1214,96 @@ with tab2:
             )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 : Templates
+# TAB 3 : BOM Upload  →  BOM_Upload_(X).xlsx
 # ─────────────────────────────────────────────────────────────────────────────
 with tab3:
+    st.markdown("Convert client BOM files to the **BulkUpload** format.")
+
+    bom_section = st.radio(
+        "Select BOM format",
+        ["📊  Tally BOM", "📋  Other Formats"],
+        horizontal=True,
+        key="bom_section",
+        label_visibility="collapsed"
+    )
+
+    st.divider()
+
+    if bom_section == "📊  Tally BOM":
+        st.markdown(
+            "Upload a Tally BOM export — **bold** rows = FG, "
+            "**italic** rows = RM, **bold+italic** rows = SFG (treated as RM under its parent)."
+        )
+
+        bom_up = st.file_uploader(
+            "Upload Tally BOM file", type=["xlsx"],
+            key="bom_up", label_visibility="collapsed"
+        )
+
+        if bom_up:
+            bom_up.seek(0)
+            bom_bytes = bom_up.read()
+            bom_fname = bom_up.name
+
+            if st.session_state.get("bom_fname") != bom_fname:
+                try:
+                    fg_rows, rm_rows = parse_tally_bom(bom_bytes)
+                    st.session_state.bom_fname   = bom_fname
+                    st.session_state.bom_fg_rows = fg_rows
+                    st.session_state.bom_rm_rows = rm_rows
+                    st.session_state.bom_out     = None
+                except Exception as e:
+                    st.error(f"❌  Could not parse BOM file: {e}")
+                    st.stop()
+
+            fg_rows = st.session_state.bom_fg_rows
+            rm_rows = st.session_state.bom_rm_rows
+
+            name_cnt = {}
+            for r in fg_rows:
+                n = r["FG Item Name"]
+                name_cnt[n] = name_cnt.get(n, 0) + 1
+            dup_count = sum(1 for c in name_cnt.values() if c > 1)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("FG Items",      len(fg_rows))
+            c2.metric("RM Entries",    len(rm_rows))
+            c3.metric("Duplicate FGs", dup_count)
+
+            if dup_count:
+                st.warning(
+                    f"⚠️  **{dup_count} duplicate FG name(s)** found — "
+                    "highlighted in red in the output file. Review before uploading."
+                )
+
+            st.markdown("")
+            if st.button("▶  Convert Now", type="primary", use_container_width=True, key="bom_go"):
+                with st.spinner("Converting…"):
+                    bom_out = make_bom_xlsx(fg_rows, rm_rows)
+                    st.session_state.bom_out      = bom_out
+                    st.session_state.bom_out_name = bom_filename(bom_fname)
+
+            if st.session_state.get("bom_out") and st.session_state.get("bom_fname") == bom_fname:
+                st.success(
+                    f"✅  **{len(fg_rows)} FG items** and **{len(rm_rows)} RM entries** converted!"
+                )
+                st.download_button(
+                    "⬇️  Download BOM Upload File",
+                    data=st.session_state.bom_out,
+                    file_name=st.session_state.bom_out_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="bom_dl"
+                )
+
+    else:
+        st.info("🚧  Other BOM formats coming soon.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4 : Templates
+# ─────────────────────────────────────────────────────────────────────────────
+with tab4:
     templates = load_templates()
 
     if not templates:
@@ -1112,7 +1344,7 @@ with tab3:
 st.divider()
 st.markdown(
     '<p style="text-align:center;color:#444;font-size:0.78rem;margin:0;">'
-    'TranZact Ai &nbsp;·&nbsp; Master Data Converter &nbsp;·&nbsp; v2.0 &nbsp;·&nbsp; '
-    'Item Master &amp; Network Master</p>',
+    'TranZact Ai &nbsp;·&nbsp; Master Data Converter &nbsp;·&nbsp; v3.0 &nbsp;·&nbsp; '
+    'Item Master &nbsp;·&nbsp; Network Master &nbsp;·&nbsp; BOM Upload</p>',
     unsafe_allow_html=True
 )
