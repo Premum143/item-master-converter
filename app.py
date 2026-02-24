@@ -835,6 +835,71 @@ def parse_qty_unit(value):
         return 1, "PCS"
 
 
+def _parse_tally_bom_xls(file_bytes):
+    """XLS branch for parse_tally_bom — uses xlrd to read bold/italic font info."""
+    wb  = xlrd.open_workbook(file_contents=file_bytes, formatting_info=True)
+    snames = wb.sheet_names()
+    ws  = wb.sheet_by_name("Item Estimates") if "Item Estimates" in snames else wb.sheet_by_index(0)
+
+    part_col   = 0
+    qty_col    = 1
+    data_start = 6  # 0-indexed fallback
+
+    for row_idx in range(min(15, ws.nrows)):
+        row = ws.row(row_idx)
+        for ci, cell in enumerate(row):
+            if cell.value and str(cell.value).strip().lower() == "particulars":
+                part_col   = ci
+                data_start = row_idx + 1
+                for cj, hcell in enumerate(row):
+                    if hcell.value and str(hcell.value).strip().lower() in ("qty", "quantity"):
+                        qty_col = cj
+                break
+        if data_start != 6:
+            break
+
+    fg_rows, rm_rows = [], []
+    fg_sl  = 0
+    parent = None
+    rm_seq = 0
+
+    for row_idx in range(data_start, ws.nrows):
+        row = ws.row(row_idx)
+        if part_col >= len(row):
+            continue
+        cell_part = row[part_col]
+        name = str(cell_part.value).strip() if cell_part.value not in (None, "", xlrd.empty_cell.value) else ""
+        if not name:
+            continue
+
+        xf     = wb.xf_list[cell_part.xf_index]
+        font   = wb.font_list[xf.font_index]
+        bold   = bool(font.bold)
+        italic = bool(font.italic)
+        qty_raw = row[qty_col].value if qty_col < len(row) else None
+
+        if bold and not italic:
+            fg_sl += 1
+            _, uom = parse_qty_unit(qty_raw)
+            fg_rows.append({
+                "Sl_No": fg_sl, "FG Item Name": name,
+                "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
+            })
+            parent = fg_sl
+            rm_seq = 0
+        elif italic:
+            if parent is None:
+                continue
+            rm_seq += 1
+            qty, unit = parse_qty_unit(qty_raw)
+            rm_rows.append({
+                "Sl_No": parent, "#": rm_seq,
+                "Item Description": name, "Quantity": qty, "Unit": unit,
+            })
+
+    return fg_rows, rm_rows
+
+
 def parse_tally_bom(file_bytes):
     """
     Parse Tally BOM Excel (Item Estimates sheet).
@@ -852,8 +917,13 @@ def parse_tally_bom(file_bytes):
       Italic only     → RM of current parent
       Bold + Italic   → SFG: added as RM of current parent (parent context unchanged)
 
+    Supports both .xlsx and .xls formats.
     Returns (fg_rows, rm_rows) as lists of dicts.
     """
+    if file_bytes[:4] == b'\xd0\xcf\x11\xe0':   # XLS magic bytes
+        return _parse_tally_bom_xls(file_bytes)
+
+    # ── XLSX path (openpyxl) ──────────────────────────────────────────
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws = wb["Item Estimates"] if "Item Estimates" in wb.sheetnames else wb.active
 
@@ -1633,7 +1703,7 @@ with tab3:
         )
 
         bom_up = st.file_uploader(
-            "Upload Tally BOM file", type=["xlsx"],
+            "Upload Tally BOM file", type=["xlsx", "xls"],
             key="bom_up", label_visibility="collapsed"
         )
 
