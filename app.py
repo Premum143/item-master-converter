@@ -837,6 +837,13 @@ def apply_pincode_lookup(parties, pincode_db):
                     p["State"] = entry.get("s") or None
     return parties
 
+def fill_addr2_with_city(parties):
+    """If Address Line 2 is empty, copy City into it."""
+    for p in parties:
+        if not p.get("Address Line 2") and p.get("City"):
+            p["Address Line 2"] = p["City"]
+    return parties
+
 def split_network_sheets(parties):
     """
     Sheet 1 (Ready to upload)        : Address Line 1 AND valid 6-digit PIN, non-duplicate GSTIN
@@ -1903,6 +1910,7 @@ with tab2:
                                 continue
                             all_parties.extend(ps)
                         parties = apply_pincode_lookup(all_parties, load_pincode_db())
+                        parties = fill_addr2_with_city(parties)
                         ready, have_gstin, manual, duplicates = split_network_sheets(parties)
                         st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual, duplicates)
                         st.session_state.net_out_name = net_filename(net_fname)
