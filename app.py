@@ -1841,45 +1841,68 @@ with tab2:
 
         if st.session_state.get("net_fname") != net_fname:
             try:
-                sheets    = read_file(net_bytes)
-                sname     = _tally_detect_sheet(sheets)
-                rows      = sheets[sname]
-                fmt, hidx = detect_network_format(rows)
-                st.session_state.net_fname = net_fname
-                st.session_state.net_rows  = rows
-                st.session_state.net_hidx  = hidx
-                st.session_state.net_fmt   = fmt
-                st.session_state.net_out   = None
+                sheets   = read_file(net_bytes)
+                detected = []
+                for sname, srows in sheets.items():
+                    fmt, hidx = detect_network_format(srows)
+                    if fmt != "unknown":
+                        data_cnt = sum(1 for r in srows[hidx + 1:] if any(v for v in r if v))
+                        if data_cnt > 0:
+                            detected.append({"name": sname, "rows": srows,
+                                             "fmt": fmt, "hidx": hidx, "count": data_cnt})
+                # Fallback: nothing auto-detected — try most-likely sheet
+                if not detected:
+                    sname     = _tally_detect_sheet(sheets)
+                    srows     = sheets[sname]
+                    fmt, hidx = detect_network_format(srows)
+                    data_cnt  = sum(1 for r in srows[hidx + 1:] if any(v for v in r if v))
+                    detected  = [{"name": sname, "rows": srows,
+                                  "fmt": fmt, "hidx": hidx, "count": data_cnt}]
+                st.session_state.net_fname    = net_fname
+                st.session_state.net_detected = detected
+                st.session_state.net_out      = None
             except Exception as e:
                 st.error(f"❌  Could not read file: {e}")
                 st.stop()
 
-        rows  = st.session_state.net_rows
-        hidx  = st.session_state.net_hidx
-        fmt   = st.session_state.net_fmt
+        detected   = st.session_state.net_detected
+        fmt_labels = {"tally": "Tally Export", "mshriy": "MSHRIY Format",
+                      "generic": "Generic Format", "unknown": "Unknown"}
 
-        fmt_labels = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "generic": "Generic Format", "unknown": "Unknown"}
-        st.markdown(f'<span class="fmt-badge">⚙ {fmt_labels.get(fmt, fmt)}</span>', unsafe_allow_html=True)
+        # Show one badge per detected sheet
+        badges = " ".join(
+            f'<span class="fmt-badge">⚙ {fmt_labels.get(d["fmt"], d["fmt"])} · {d["name"]}</span>'
+            for d in detected
+        )
+        st.markdown(badges, unsafe_allow_html=True)
 
         col_a, col_b = st.columns(2)
         col_a.metric("File", net_fname.rsplit(".", 1)[0][:28])
-        data_rows_net = [r for r in rows[hidx + 1:] if any(v for v in r if v)]
-        col_b.metric("Rows detected", len(data_rows_net))
+        col_b.metric("Rows detected", sum(d["count"] for d in detected))
+        if len(detected) > 1:
+            st.caption("📋 Party data found in: " +
+                       ", ".join(f'**{d["name"]}** ({d["count"]} rows)' for d in detected))
 
-        if fmt == "unknown":
+        any_known = any(d["fmt"] != "unknown" for d in detected)
+        if not any_known:
             st.warning("⚠️  Could not detect file format. Please check the file.")
         else:
             st.markdown("")
             if st.button("▶  Convert Now", type="primary", use_container_width=True, key="net_go"):
                 with st.spinner("Converting…"):
                     try:
-                        if fmt == "tally":
-                            parties = convert_tally_parties(rows, hidx)
-                        elif fmt == "mshriy":
-                            parties = convert_mshriy_parties(rows, hidx)
-                        else:  # generic
-                            parties = convert_generic_parties(rows, hidx)
-                        parties = apply_pincode_lookup(parties, load_pincode_db())
+                        all_parties = []
+                        for d in detected:
+                            if d["fmt"] == "tally":
+                                ps = convert_tally_parties(d["rows"], d["hidx"])
+                            elif d["fmt"] == "mshriy":
+                                ps = convert_mshriy_parties(d["rows"], d["hidx"])
+                            elif d["fmt"] == "generic":
+                                ps = convert_generic_parties(d["rows"], d["hidx"])
+                            else:
+                                continue
+                            all_parties.extend(ps)
+                        parties = apply_pincode_lookup(all_parties, load_pincode_db())
                         ready, have_gstin, manual, duplicates = split_network_sheets(parties)
                         st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual, duplicates)
                         st.session_state.net_out_name = net_filename(net_fname)
