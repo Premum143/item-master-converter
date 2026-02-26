@@ -97,9 +97,22 @@ def _fmt_cell(val, fmt):
     return val
 
 def read_file(file_bytes):
-    """Read all sheets from xls or xlsx. Returns {sheet_name: [[row_values]]}"""
-    is_xls = file_bytes[:4] == b'\xd0\xcf\x11\xe0'
+    """Read all sheets from xls, xlsx, or csv. Returns {sheet_name: [[row_values]]}"""
+    is_xls  = file_bytes[:4] == b'\xd0\xcf\x11\xe0'
+    is_xlsx = file_bytes[:4] == b'PK\x03\x04'
     sheets = {}
+    if not is_xls and not is_xlsx:
+        # Treat as CSV
+        import csv as _csv
+        try:
+            text = file_bytes.decode('utf-8-sig')
+        except UnicodeDecodeError:
+            text = file_bytes.decode('latin-1')
+        reader = _csv.reader(io.StringIO(text))
+        rows = []
+        for row in reader:
+            rows.append([cell.strip() if cell.strip() else None for cell in row])
+        return {"Sheet1": rows}
     if is_xls:
         wb = xlrd.open_workbook(file_contents=file_bytes, formatting_info=True)
         xf_list   = wb.xf_list
@@ -149,6 +162,24 @@ def pick_sheet(sheets):
         1 for r in sheets[s]
         if any(v is not None and str(v).strip() for v in r)
     ))
+
+def pick_item_master_sheet(sheets):
+    """
+    Return the sheet whose header row contains HSN, UOM/Unit, AND Tax columns.
+    Falls back to pick_sheet() if no such sheet is found.
+    """
+    HSN_KWS = {"hsn", "sac"}
+    UOM_KWS = {"unit", "uom", "measure"}
+    TAX_KWS = {"tax", "gst", "igst"}
+    for name, rows in sheets.items():
+        for row in rows[:20]:
+            vals = [str(v).strip().lower() for v in row if v is not None and str(v).strip()]
+            has_hsn = any(any(kw in v for kw in HSN_KWS) for v in vals)
+            has_uom = any(any(kw in v for kw in UOM_KWS) for v in vals)
+            has_tax = any(any(kw in v for kw in TAX_KWS) for v in vals)
+            if has_hsn and has_uom and has_tax:
+                return name
+    return pick_sheet(sheets)
 
 def detect_header(rows):
     """
@@ -525,6 +556,65 @@ def parse_mshriy_address(addr_str):
 
     return addr1, addr2, city, state, pincode
 
+STATE_ABBR_TO_NAME = {
+    "AP": "Andhra Pradesh",   "AR": "Arunachal Pradesh", "AS": "Assam",
+    "BR": "Bihar",            "CG": "Chhattisgarh",      "GA": "Goa",
+    "GJ": "Gujarat",          "HR": "Haryana",            "HP": "Himachal Pradesh",
+    "JH": "Jharkhand",        "KA": "Karnataka",          "KL": "Kerala",
+    "MP": "Madhya Pradesh",   "MH": "Maharashtra",        "MN": "Manipur",
+    "ML": "Meghalaya",        "MZ": "Mizoram",            "NL": "Nagaland",
+    "OD": "Odisha",           "OR": "Odisha",             "PB": "Punjab",
+    "RJ": "Rajasthan",        "SK": "Sikkim",             "TN": "Tamil Nadu",
+    "TS": "Telangana",        "TR": "Tripura",            "UP": "Uttar Pradesh",
+    "UK": "Uttarakhand",      "WB": "West Bengal",
+    "AN": "Andaman and Nicobar Islands", "CH": "Chandigarh",
+    "DN": "Dadra and Nagar Haveli",      "DD": "Daman and Diu",
+    "DL": "Delhi",            "JK": "Jammu & Kashmir",   "LA": "Ladakh",
+    "LD": "Lakshadweep",      "PY": "Puducherry",
+}
+
+def parse_combined_address(addr_str):
+    """
+    Parse a combined address like:
+    'No 71 1st Cross 2nd Main Road New Tharagupet Bengaluru KA- 560002'
+    '311/47-D, Sandaipet Main Road, Shevapet Salem TN- 636002'
+
+    Pattern: ...City STATE_ABBR- PINCODE (last word before state abbr = city).
+    Falls back to parse_mshriy_address for comma-separated format.
+
+    Returns (addr1, addr2, city, state, pincode).
+    """
+    if not addr_str:
+        return None, None, None, None, None
+
+    s = addr_str.strip()
+    m = re.search(r'\b([A-Z]{2})\s*[-\u2013]\s*(\d{6})\s*$', s)
+    if m:
+        abbr    = m.group(1)
+        pincode = m.group(2)
+        state   = STATE_ABBR_TO_NAME.get(abbr)
+        prefix  = s[:m.start()].strip().rstrip(',').strip()
+        words   = prefix.split()
+        if words:
+            city          = words[-1]
+            addr_str_rest = " ".join(words[:-1])
+        else:
+            city          = None
+            addr_str_rest = ""
+        addr_words = addr_str_rest.split()
+        if not addr_words:
+            addr1, addr2 = None, None
+        elif len(addr_words) <= 5:
+            addr1, addr2 = addr_str_rest, None
+        else:
+            mid   = len(addr_words) // 2
+            addr1 = " ".join(addr_words[:mid]) or None
+            addr2 = " ".join(addr_words[mid:]) or None
+        return addr1, addr2, city, state, pincode
+
+    # Fallback: try comma-separated format
+    return parse_mshriy_address(addr_str)
+
 def _tally_detect_sheet(sheets):
     """Pick the SVNaturalLanguage sheet from Tally exports, else most populated."""
     if "SVNaturalLanguage" in sheets:
@@ -538,15 +628,23 @@ def _tally_detect_sheet(sheets):
 
 def detect_network_format(rows):
     """
-    Returns ('tally', header_idx) or ('mshriy', header_idx) or ('unknown', 0).
+    Returns ('tally', header_idx) or ('mshriy', header_idx) or
+            ('generic', header_idx) or ('unknown', 0).
+    Generic: single combined ADDRESS column + GSTIN + vendor/party name col.
     """
     for i, row in enumerate(rows[:15]):
-        vals = [str(v).strip().lower() for v in row if v is not None and str(v).strip()]
+        vals   = [str(v).strip().lower() for v in row if v is not None and str(v).strip()]
         joined = " ".join(vals)
         if "$name" in joined or "$_primarygroup" in joined:
             return "tally", i
         if "name of ledger" in joined or ("sl" in joined and "name" in joined):
             return "mshriy", i
+        # Generic: has a combined address column + GSTIN + party name column
+        has_addr  = any(v == "address" for v in vals)
+        has_gstin = any("gstin" in v for v in vals)
+        has_name  = any(any(kw in v for kw in ("vendor", "party", "supplier", "buyer", "customer")) for v in vals)
+        if has_addr and has_gstin and has_name:
+            return "generic", i
     return "unknown", 0
 
 def _g(row, col_map, *keys):
@@ -664,6 +762,69 @@ def convert_mshriy_parties(rows, header_idx):
         })
     return parties
 
+def convert_generic_parties(rows, header_idx):
+    """
+    Convert generic combined-address format (e.g. Tranzact):
+    VENDOR NAME | ADDRESS (full, combined) | GSTIN
+    """
+    hdrs = [str(v).strip() if v is not None else "" for v in rows[header_idx]]
+    col  = {h: i for i, h in enumerate(hdrs)}
+
+    # Auto-detect column names
+    name_col = addr_col = gstin_col = email_col = mobile_col = None
+    for h in hdrs:
+        hl = h.strip().lower()
+        if any(kw in hl for kw in ("vendor", "party", "supplier", "buyer", "customer")):
+            if name_col is None:
+                name_col = h
+        elif "name" in hl and name_col is None:
+            name_col = h
+        if "address" in hl and addr_col is None:
+            addr_col = h
+        if "gstin" in hl and gstin_col is None:
+            gstin_col = h
+        if ("email" in hl or "mail" in hl) and email_col is None:
+            email_col = h
+        if any(kw in hl for kw in ("mobile", "phone", "contact")) and mobile_col is None:
+            mobile_col = h
+
+    parties = []
+    for row in rows[header_idx + 1:]:
+        if not row or all(v is None or str(v).strip() == "" for v in row):
+            continue
+        name = _g(row, col, name_col) if name_col else None
+        if not name:
+            continue
+
+        addr_raw = _g(row, col, addr_col) if addr_col else None
+        addr1, addr2, city, state, pin_parsed = (
+            parse_combined_address(addr_raw) if addr_raw else (None, None, None, None, None)
+        )
+
+        gstin  = clean_gstin(_g(row, col, gstin_col)) if gstin_col else None
+        pin    = clean_pin(pin_parsed)
+        email  = _g(row, col, email_col)  if email_col  else None
+        mobile = _g(row, col, mobile_col) if mobile_col else None
+
+        if not state and gstin:
+            state = state_from_gstin(gstin)
+
+        parties.append({
+            "Company Name": name,
+            "Buyer/Supplier/Both": "Both",
+            "Company Reference ID": None, "TCS Type": None,
+            "Company Email": email,
+            "Company Contact Number": mobile,
+            "Address Line 1": addr1, "Address Line 2": addr2,
+            "City": city, "State": state, "Country": "India",
+            "PIN Code": pin,
+            "GSTIN": gstin, "GSTIN Type": "Regular" if gstin else None,
+            "Contact Person First Name": None,
+            "Contact Person Last Name": None, "Contact Person Email": None,
+            "_is_red": False,
+        })
+    return parties
+
 def apply_pincode_lookup(parties, pincode_db):
     for p in parties:
         pin = p.get("PIN Code")
@@ -678,37 +839,64 @@ def apply_pincode_lookup(parties, pincode_db):
 
 def split_network_sheets(parties):
     """
-    Sheet 1 (Ready to upload)  : Address Line 1 AND PIN Code both present
-    Sheet 2 (Have GSTIN)       : Not in sheet 1, but GSTIN present
-    Sheet 3 (Need to update manually): everything else
+    Sheet 1 (Ready to upload)        : Address Line 1 AND valid 6-digit PIN, non-duplicate GSTIN
+    Sheet 2 (Have GSTIN)             : Not ready but GSTIN present
+    Sheet 3 (Need to update manually): everything else, plus bad-pin rows (_bad_pin=True)
+    Sheet 4 (Duplicate GSTINs)       : rows whose GSTIN already appears in Sheet 1
     """
-    ready, have_gstin, manual = [], [], []
+    ready, have_gstin, manual, duplicates = [], [], [], []
+    seen_gstins = set()
+
+    temp_ready = []
     for p in parties:
-        if p.get("Address Line 1") and p.get("PIN Code"):
-            ready.append(p)
+        pin       = p.get("PIN Code")
+        pin_valid = bool(pin and len(str(pin)) >= 6)
+        has_addr  = bool(p.get("Address Line 1"))
+
+        if has_addr and pin_valid:
+            temp_ready.append(p)
+        elif has_addr and pin and not pin_valid:
+            p2 = dict(p)
+            p2["_bad_pin"] = True
+            manual.append(p2)
         elif p.get("GSTIN"):
             have_gstin.append(p)
         else:
             manual.append(p)
-    return ready, have_gstin, manual
 
-def make_network_xlsx(ready, have_gstin, manual):
+    for p in temp_ready:
+        gstin = p.get("GSTIN")
+        if gstin and gstin in seen_gstins:
+            duplicates.append(p)
+        else:
+            if gstin:
+                seen_gstins.add(gstin)
+            ready.append(p)
+
+    return ready, have_gstin, manual, duplicates
+
+def make_network_xlsx(ready, have_gstin, manual, duplicates=None):
     from openpyxl.styles import PatternFill
-    RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+    RED_FILL     = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+    PIN_RED_FILL = PatternFill(start_color="FF6666", end_color="FF6666", fill_type="solid")
+    PIN_COL_IDX  = NETWORK_OUT_HEADERS.index("PIN Code") + 1   # 1-indexed
 
-    wb  = Workbook()
+    wb = Workbook()
     def write_sheet(ws, parties):
         ws.append(NETWORK_OUT_HEADERS)
         for p in parties:
             ws.append([p.get(h) for h in NETWORK_OUT_HEADERS])
+            r = ws.max_row
             if p.get("_is_red"):
-                r = ws.max_row
                 for c in range(1, len(NETWORK_OUT_HEADERS) + 1):
                     ws.cell(row=r, column=c).fill = RED_FILL
+            if p.get("_bad_pin"):
+                ws.cell(row=r, column=PIN_COL_IDX).fill = PIN_RED_FILL
 
-    ws1 = wb.active;  ws1.title = "Ready to upload";     write_sheet(ws1, ready)
-    ws2 = wb.create_sheet("Have GSTIN");                  write_sheet(ws2, have_gstin)
-    ws3 = wb.create_sheet("Need to update manually");     write_sheet(ws3, manual)
+    ws1 = wb.active;  ws1.title = "Ready to upload";      write_sheet(ws1, ready)
+    ws2 = wb.create_sheet("Have GSTIN");                   write_sheet(ws2, have_gstin)
+    ws3 = wb.create_sheet("Need to update manually");      write_sheet(ws3, manual)
+    ws4 = wb.create_sheet("Duplicate GSTINs");             write_sheet(ws4, duplicates or [])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -859,9 +1047,10 @@ def _parse_tally_bom_xls(file_bytes):
             break
 
     fg_rows, rm_rows = [], []
-    fg_sl  = 0
-    parent = None
-    rm_seq = 0
+    fg_sl         = 0
+    parent        = None
+    rm_seq        = 0
+    parent_fg_qty = 1
 
     for row_idx in range(data_start, ws.nrows):
         row = ws.row(row_idx)
@@ -872,26 +1061,29 @@ def _parse_tally_bom_xls(file_bytes):
         if not name:
             continue
 
-        xf     = wb.xf_list[cell_part.xf_index]
-        font   = wb.font_list[xf.font_index]
-        bold   = bool(font.bold)
-        italic = bool(font.italic)
+        xf      = wb.xf_list[cell_part.xf_index]
+        font    = wb.font_list[xf.font_index]
+        bold    = bool(font.bold)
+        italic  = bool(font.italic)
         qty_raw = row[qty_col].value if qty_col < len(row) else None
 
         if bold and not italic:
             fg_sl += 1
-            _, uom = parse_qty_unit(qty_raw)
+            fg_qty, uom = parse_qty_unit(qty_raw)
             fg_rows.append({
                 "Sl_No": fg_sl, "FG Item Name": name,
                 "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
             })
-            parent = fg_sl
-            rm_seq = 0
+            parent        = fg_sl
+            parent_fg_qty = fg_qty
+            rm_seq        = 0
         elif italic:
             if parent is None:
                 continue
             rm_seq += 1
             qty, unit = parse_qty_unit(qty_raw)
+            if parent_fg_qty and parent_fg_qty > 1:
+                qty = qty / parent_fg_qty
             rm_rows.append({
                 "Sl_No": parent, "#": rm_seq,
                 "Item Description": name, "Quantity": qty, "Unit": unit,
@@ -947,9 +1139,10 @@ def parse_tally_bom(file_bytes):
 
     # ── Parse data rows ───────────────────────────────────────────────
     fg_rows, rm_rows = [], []
-    fg_sl  = 0
-    parent = None
-    rm_seq = 0
+    fg_sl         = 0
+    parent        = None
+    rm_seq        = 0
+    parent_fg_qty = 1
 
     for row in ws.iter_rows(min_row=data_start):
         if part_col >= len(row):
@@ -968,13 +1161,14 @@ def parse_tally_bom(file_bytes):
         if bold and not italic:
             # ── FG ──────────────────────────────────────────────────────
             fg_sl += 1
-            _, uom = parse_qty_unit(qty_raw)
+            fg_qty, uom = parse_qty_unit(qty_raw)
             fg_rows.append({
                 "Sl_No": fg_sl, "FG Item Name": name,
                 "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
             })
-            parent = fg_sl
-            rm_seq = 0
+            parent        = fg_sl
+            parent_fg_qty = fg_qty
+            rm_seq        = 0
 
         elif italic:
             # ── RM or SFG-as-RM ─────────────────────────────────────────
@@ -982,6 +1176,8 @@ def parse_tally_bom(file_bytes):
                 continue
             rm_seq += 1
             qty, unit = parse_qty_unit(qty_raw)
+            if parent_fg_qty and parent_fg_qty > 1:
+                qty = qty / parent_fg_qty
             rm_rows.append({
                 "Sl_No": parent, "#": rm_seq,
                 "Item Description": name, "Quantity": qty, "Unit": unit,
@@ -1066,16 +1262,27 @@ def get_bom_preview(file_bytes):
     """
     Return (preview_text_for_gemini, rows_for_display).
     Shows up to 25 non-empty rows with actual Excel row numbers and column letters.
+    Supports xlsx, xls, and csv.
     """
-    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-    ws = wb.active
-
-    rows_with_idx = []
-    for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=50, values_only=True), start=1):
-        if any(v is not None for v in row):
-            rows_with_idx.append((idx, list(row)))
-        if len(rows_with_idx) >= 25:
-            break
+    is_xlsx = file_bytes[:4] == b'PK\x03\x04'
+    if is_xlsx:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+        ws = wb.active
+        rows_with_idx = []
+        for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=50, values_only=True), start=1):
+            if any(v is not None for v in row):
+                rows_with_idx.append((idx, list(row)))
+            if len(rows_with_idx) >= 25:
+                break
+    else:
+        # XLS or CSV — use read_file
+        sheets = read_file(file_bytes)
+        sname  = pick_sheet(sheets)
+        all_rows = sheets[sname]
+        rows_with_idx = [
+            (i + 1, list(r)) for i, r in enumerate(all_rows)
+            if any(v is not None for v in r)
+        ][:25]
 
     if not rows_with_idx:
         return "Empty file.", []
@@ -1189,11 +1396,29 @@ def extract_bom_spec(text):
     return None
 
 
+def _to_xlsx_bytes(file_bytes):
+    """If file_bytes is CSV or XLS, convert to in-memory xlsx for openpyxl."""
+    is_xlsx = file_bytes[:4] == b'PK\x03\x04'
+    if is_xlsx:
+        return file_bytes
+    sheets = read_file(file_bytes)
+    sname  = pick_sheet(sheets)
+    rows   = sheets[sname]
+    wb2    = Workbook()
+    ws2    = wb2.active
+    for row in rows:
+        ws2.append([v for v in row])
+    buf = io.BytesIO()
+    wb2.save(buf)
+    return buf.getvalue()
+
+
 def apply_bom_spec(file_bytes, spec):
     """
     Apply a Gemini-generated conversion spec to a BOM file.
     Returns (fg_rows, rm_rows) in the same format as parse_tally_bom.
     """
+    file_bytes = _to_xlsx_bytes(file_bytes)
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
     ws = wb.active
 
@@ -1204,9 +1429,10 @@ def apply_bom_spec(file_bytes, spec):
     data_start  = header_row + 2                 # first data row in openpyxl (1-indexed)
 
     fg_rows, rm_rows = [], []
-    fg_sl  = 0
-    parent = None
-    rm_seq = 0
+    fg_sl         = 0
+    parent        = None
+    rm_seq        = 0
+    parent_fg_qty = 1
 
     for row in ws.iter_rows(min_row=data_start):
         if item_col >= len(row):
@@ -1296,32 +1522,38 @@ def apply_bom_spec(file_bytes, spec):
                     if parent is not None:
                         rm_seq += 1
                         qty, unit = parse_qty_unit(qty_raw)
+                        if parent_fg_qty and parent_fg_qty > 1:
+                            qty = qty / parent_fg_qty
                         rm_rows.append({
                             "Sl_No": parent, "#": rm_seq,
                             "Item Description": name, "Quantity": qty, "Unit": unit,
                         })
                     fg_sl += 1
-                    _, uom = parse_qty_unit(qty_raw)
+                    sfg_qty, uom = parse_qty_unit(qty_raw)
                     fg_rows.append({
                         "Sl_No": fg_sl, "FG Item Name": name,
                         "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
                     })
-                    parent = fg_sl
-                    rm_seq = 0
+                    parent        = fg_sl
+                    parent_fg_qty = sfg_qty
+                    rm_seq        = 0
                     continue   # already handled, skip generic is_fg/is_rm block
 
         if is_fg:
             fg_sl += 1
-            _, uom = parse_qty_unit(qty_raw)
+            fg_qty, uom = parse_qty_unit(qty_raw)
             fg_rows.append({
                 "Sl_No": fg_sl, "FG Item Name": name,
                 "FG UOM": uom, "BOM Name": name, "FG Cost Allocation": 100,
             })
-            parent = fg_sl
-            rm_seq = 0
+            parent        = fg_sl
+            parent_fg_qty = fg_qty
+            rm_seq        = 0
         elif is_rm and parent is not None:
             rm_seq += 1
             qty, unit = parse_qty_unit(qty_raw)
+            if parent_fg_qty and parent_fg_qty > 1:
+                qty = qty / parent_fg_qty
             rm_rows.append({
                 "Sl_No": parent, "#": rm_seq,
                 "Item Description": name, "Quantity": qty, "Unit": unit,
@@ -1488,7 +1720,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["📦  Item Master", "🏢  Network Master", "
 with tab1:
     st.markdown("Upload any client item file — columns are **auto-detected and mapped** to your format.")
 
-    up = st.file_uploader("Upload client file", type=["xlsx", "xls"], key="t1_up",
+    up = st.file_uploader("Upload client file", type=["xlsx", "xls", "csv"], key="t1_up",
                           label_visibility="collapsed")
 
     if up:
@@ -1498,7 +1730,7 @@ with tab1:
 
         if st.session_state.get("t1_fname") != fname:
             sheets     = read_file(fbytes)
-            sname      = pick_sheet(sheets)
+            sname      = pick_item_master_sheet(sheets)
             rows       = sheets[sname]
             hidx, hdrs = detect_header(rows)
             data_rows  = [r for r in rows[hidx + 1:] if any(v for v in r)]
@@ -1599,7 +1831,7 @@ with tab1:
 with tab2:
     st.markdown("Upload a client ledger / vendor file — auto-converts to your **Network Add** format.")
 
-    net_up = st.file_uploader("Upload client file", type=["xlsx", "xls"], key="net_up",
+    net_up = st.file_uploader("Upload client file", type=["xlsx", "xls", "csv"], key="net_up",
                                label_visibility="collapsed")
 
     if net_up:
@@ -1626,7 +1858,7 @@ with tab2:
         hidx  = st.session_state.net_hidx
         fmt   = st.session_state.net_fmt
 
-        fmt_labels = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "unknown": "Unknown"}
+        fmt_labels = {"tally": "Tally Export", "mshriy": "MSHRIY Format", "generic": "Generic Format", "unknown": "Unknown"}
         st.markdown(f'<span class="fmt-badge">⚙ {fmt_labels.get(fmt, fmt)}</span>', unsafe_allow_html=True)
 
         col_a, col_b = st.columns(2)
@@ -1641,17 +1873,22 @@ with tab2:
             if st.button("▶  Convert Now", type="primary", use_container_width=True, key="net_go"):
                 with st.spinner("Converting…"):
                     try:
-                        parties = convert_tally_parties(rows, hidx) if fmt == "tally" else convert_mshriy_parties(rows, hidx)
+                        if fmt == "tally":
+                            parties = convert_tally_parties(rows, hidx)
+                        elif fmt == "mshriy":
+                            parties = convert_mshriy_parties(rows, hidx)
+                        else:  # generic
+                            parties = convert_generic_parties(rows, hidx)
                         parties = apply_pincode_lookup(parties, load_pincode_db())
-                        ready, have_gstin, manual = split_network_sheets(parties)
-                        st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual)
+                        ready, have_gstin, manual, duplicates = split_network_sheets(parties)
+                        st.session_state.net_out      = make_network_xlsx(ready, have_gstin, manual, duplicates)
                         st.session_state.net_out_name = net_filename(net_fname)
-                        st.session_state.net_counts   = (len(ready), len(have_gstin), len(manual), len(parties))
+                        st.session_state.net_counts   = (len(ready), len(have_gstin), len(manual), len(duplicates), len(parties))
                     except Exception as e:
                         st.error(f"❌  Something went wrong: {e}")
 
         if st.session_state.get("net_out") and st.session_state.get("net_fname") == net_fname:
-            r, g, m, total = st.session_state.net_counts
+            r, g, m, d, total = st.session_state.net_counts
             st.markdown(f"""
             <div class="stat-cards">
               <div class="stat-card stat-green">
@@ -1666,8 +1903,12 @@ with tab2:
                 <div class="sc-num">{m}</div>
                 <div class="sc-lbl">✏️ NEED MANUAL UPDATE</div>
               </div>
+              <div class="stat-card" style="background:#1a1025;border:1px solid #3d2060;">
+                <div class="sc-num" style="color:#c084fc;">{d}</div>
+                <div class="sc-lbl" style="color:#d8b4fe;">🔁 DUPLICATE GSTINs</div>
+              </div>
             </div>
-            <p style="color:#666;font-size:0.78rem;margin:0 0 12px 0;">{total} parties processed total &nbsp;·&nbsp; 🔴 Red rows = non-standard party type — review with client</p>
+            <p style="color:#666;font-size:0.78rem;margin:0 0 12px 0;">{total} parties processed total &nbsp;·&nbsp; 🔴 Red rows = non-standard party type — review with client &nbsp;·&nbsp; 🔴 Red PIN cell = incomplete pincode</p>
             """, unsafe_allow_html=True)
 
             st.download_button(
@@ -1703,9 +1944,12 @@ with tab3:
         )
 
         bom_up = st.file_uploader(
-            "Upload Tally BOM file", type=["xlsx", "xls"],
+            "Upload Tally BOM file", type=["xlsx", "xls", "csv"],
             key="bom_up", label_visibility="collapsed"
         )
+
+        if bom_up and bom_up.name.lower().endswith(".csv"):
+            st.warning("⚠️  CSV files don't contain font formatting — FG/RM detection relies on **bold/italic** fonts and won't work. Please upload an **.xlsx** or **.xls** file for best results.")
 
         if bom_up:
             bom_up.seek(0)
@@ -1784,7 +2028,7 @@ with tab3:
             st.info("Enter your Gemini API key above to get started.")
         else:
             other_up = st.file_uploader(
-                "Upload BOM file (any format)", type=["xlsx", "xls"],
+                "Upload BOM file (any format)", type=["xlsx", "xls", "csv"],
                 key="other_bom_up", label_visibility="collapsed"
             )
 
