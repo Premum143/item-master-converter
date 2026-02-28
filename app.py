@@ -626,6 +626,23 @@ def _tally_detect_sheet(sheets):
                 return name
     return pick_sheet(sheets)
 
+ITEM_MASTER_SIGNALS = {
+    "hsn", "hsn code", "sac", "item id", "item code", "sku",
+    "uom", "unit of measurement", "item category", "item type",
+    "mrp", "selling price", "buying price",
+    "regular selling price", "regular buying price",
+}
+
+def is_item_master_file(sheets):
+    """Returns (True, matched_signals) if file looks like an Item Master."""
+    for srows in sheets.values():
+        for row in srows[:15]:
+            vals = {str(v).strip().lower() for v in row if v is not None and str(v).strip()}
+            matched = vals & ITEM_MASTER_SIGNALS
+            if len(matched) >= 2:
+                return True, matched
+    return False, set()
+
 def detect_network_format(rows):
     """
     Returns ('tally', header_idx) or ('mshriy', header_idx) or
@@ -1849,6 +1866,14 @@ with tab2:
         if st.session_state.get("net_fname") != net_fname:
             try:
                 sheets   = read_file(net_bytes)
+                im_flag, im_cols = is_item_master_file(sheets)
+                if im_flag:
+                    st.error(
+                        f"❌ This looks like an **Item Master** file "
+                        f"(detected columns: *{', '.join(sorted(im_cols))}*). "
+                        f"Please upload it in the **📦 Item Master** tab instead."
+                    )
+                    st.stop()
                 detected = []
                 for sname, srows in sheets.items():
                     fmt, hidx = detect_network_format(srows)
