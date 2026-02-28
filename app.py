@@ -633,14 +633,13 @@ ITEM_MASTER_SIGNALS = {
     "regular selling price", "regular buying price",
 }
 
-def is_item_master_file(sheets):
-    """Returns (True, matched_signals) if file looks like an Item Master."""
-    for srows in sheets.values():
-        for row in srows[:15]:
-            vals = {str(v).strip().lower() for v in row if v is not None and str(v).strip()}
-            matched = vals & ITEM_MASTER_SIGNALS
-            if len(matched) >= 2:
-                return True, matched
+def is_item_master_sheet(rows):
+    """Returns (True, matched_signals) if this individual sheet looks like an Item Master."""
+    for row in rows[:15]:
+        vals = {str(v).strip().lower() for v in row if v is not None and str(v).strip()}
+        matched = vals & ITEM_MASTER_SIGNALS
+        if len(matched) >= 2:
+            return True, matched
     return False, set()
 
 def detect_network_format(rows):
@@ -1866,26 +1865,45 @@ with tab2:
         if st.session_state.get("net_fname") != net_fname:
             try:
                 sheets   = read_file(net_bytes)
-                im_flag, im_cols = is_item_master_file(sheets)
-                if im_flag:
+
+                # Per-sheet filter: skip item master sheets, keep network sheets
+                skipped_im, network_sheets = [], {}
+                for sname, srows in sheets.items():
+                    im_flag, im_cols = is_item_master_sheet(srows)
+                    if im_flag:
+                        skipped_im.append((sname, im_cols))
+                    else:
+                        network_sheets[sname] = srows
+
+                # If every sheet is item master — wrong tab entirely
+                if not network_sheets:
+                    all_cols = set()
+                    for _, cols in skipped_im:
+                        all_cols |= cols
                     st.error(
                         f"❌ This looks like an **Item Master** file "
-                        f"(detected columns: *{', '.join(sorted(im_cols))}*). "
+                        f"(detected columns: *{', '.join(sorted(all_cols))}*). "
                         f"Please upload it in the **📦 Item Master** tab instead."
                     )
                     st.stop()
+
+                # Warn about skipped sheets but continue processing
+                if skipped_im:
+                    skipped_names = ", ".join(f"**{s}**" for s, _ in skipped_im)
+                    st.info(f"ℹ️ Skipped item master sheet(s): {skipped_names} — processing remaining sheets for network data.")
+
                 detected = []
-                for sname, srows in sheets.items():
+                for sname, srows in network_sheets.items():
                     fmt, hidx = detect_network_format(srows)
                     if fmt != "unknown":
                         data_cnt = sum(1 for r in srows[hidx + 1:] if any(v for v in r if v))
                         if data_cnt > 0:
                             detected.append({"name": sname, "rows": srows,
                                              "fmt": fmt, "hidx": hidx, "count": data_cnt})
-                # Fallback: nothing auto-detected — try most-likely sheet
+                # Fallback: nothing auto-detected — try most-likely sheet from network_sheets
                 if not detected:
-                    sname     = _tally_detect_sheet(sheets)
-                    srows     = sheets[sname]
+                    sname     = _tally_detect_sheet(network_sheets)
+                    srows     = network_sheets[sname]
                     fmt, hidx = detect_network_format(srows)
                     data_cnt  = sum(1 for r in srows[hidx + 1:] if any(v for v in r if v))
                     detected  = [{"name": sname, "rows": srows,
